@@ -1,0 +1,11 @@
+[project]
+name = "invoicelayoutandprinting"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "nuitka>=2.8.6",
+    "pypdf>=3.9",
+    "pyqt6>=6.5",
+]
