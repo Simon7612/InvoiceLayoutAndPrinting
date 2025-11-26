@@ -38,6 +38,7 @@ jobs:
             --include-package=PyQt6 ^
             --enable-plugin=pyqt6 ^
             --output-dir=dist ^
+            --assume-yes-for-downloads ^
             main.py
 
         shell: cmd
