@@ -44,8 +44,7 @@ jobs:
         shell: cmd
 
       - name: Rename output to expected name
-        run: |
-          ren dist\main.exe "发票排版与打印.exe"
+        run:  ren main.exe "发票排版与打印.exe"
         working-directory: ./dist
 
       - name: Upload artifact (for debugging or reuse)
