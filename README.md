@@ -82,3 +82,7 @@ InvoiceLayoutAndPrinting/
 ## 许可
 未设置专用许可证；如需开源许可证可补充（例如 MIT）。
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Simon7612/InvoiceLayoutAndPrinting&type=date&legend=top-left)](https://www.star-history.com/#Simon7612/InvoiceLayoutAndPrinting&type=date&legend=top-left)
+
