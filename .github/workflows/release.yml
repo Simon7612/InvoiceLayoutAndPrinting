@@ -26,7 +26,7 @@ jobs:
           pip install nuitka pyqt6 pypdf
 
       - name: Run basic import test (smoke test)
-        run: python -c "import gui, layoutInvoice, printInvoice, readInvoice; print('✅ All modules imported successfully')"
+        run: python -c "import gui, layoutInvoice, printInvoice, readInvoice; print('All modules imported successfully')"
 
       - name: Build executable with Nuitka
         run: |
