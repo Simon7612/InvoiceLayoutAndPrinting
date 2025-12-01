@@ -28,8 +28,15 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QSize, QEvent
 from PyQt6.QtGui import QIcon
 import ctypes, sys
-from readInvoice import collect_pdfs, read_pdf
-from layoutInvoice import two_up_vertical, two_up_vertical_pages, write_writer
+from readInvoice import collect_pdfs, read_pdf, read_document, detect_ticket_document
+from layoutInvoice import (
+    two_up_vertical,
+    two_up_vertical_pages,
+    write_writer,
+    compose_pages,
+    LayoutMode,
+    Orientation,
+)
 from printInvoice import print_pdf
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtPdfWidgets import QPdfView
@@ -86,7 +93,7 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(12)
         self.label_count = QLabel("已上传 0 个文件")
         self.btn_import = QPushButton("+ 添加发票")
-        self.hint_left = QLabel("仅支持 PDF \n拖拽发票到此处 或 点击上方按钮导入")
+        self.hint_left = QLabel("支持 PDF/OFD/XML \n拖拽发票到此处 或 点击上方按钮导入")
         self.hint_left.setAlignment(Qt.AlignmentFlag.AlignCenter)
         import_card = ImportDropArea(self.on_drop_files)
         import_card.setObjectName("ImportCard")
@@ -129,9 +136,103 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(12)
         layout_box = QGroupBox("排版方式")
         rb_layout = QVBoxLayout()
-        self.rb_two_up = QRadioButton("双页上下")
-        self.rb_two_up.setChecked(True)
-        rb_layout.addWidget(self.rb_two_up)
+        # 1) 卡片式布局选择
+        from PyQt6.QtWidgets import QGridLayout, QButtonGroup
+        grid = QGridLayout()
+        grid.setSpacing(8)
+
+        def make_tile(text: str, enabled: bool=True) -> QToolButton:
+            b = QToolButton()
+            b.setCheckable(True)
+            b.setEnabled(enabled)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            b.setText(text)
+            b.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
+            b.setIconSize(QSize(24, 24))
+            b.setAutoRaise(False)
+            b.setMinimumSize(QSize(120, 64))
+            return b
+
+        self.btn_layout_custom = make_tile("自定义\n自由定义布局", enabled=True)
+        self.btn_layout_one = make_tile("单页\n一页一张")
+        self.btn_layout_two_v = make_tile("双页\n上下布局")
+        self.btn_layout_four = make_tile("四页\n2×2布局")
+
+        grid.addWidget(self.btn_layout_custom, 0, 0)
+        grid.addWidget(self.btn_layout_one,    0, 1)
+        grid.addWidget(self.btn_layout_two_v,  1, 0)
+        grid.addWidget(self.btn_layout_four,   1, 1)
+
+        self.group_layout_tiles = QButtonGroup(self)
+        for i, b in enumerate([self.btn_layout_custom, self.btn_layout_one, self.btn_layout_two_v, self.btn_layout_four]):
+            self.group_layout_tiles.addButton(b, i)
+        self.group_layout_tiles.setExclusive(True)
+        self.btn_layout_one.setChecked(True)  # 默认单页一张
+
+        rb_layout.addLayout(grid)
+
+        # 2) 纸张方向（纵向/横向）
+        h_orient = QHBoxLayout()
+        self.btn_portrait = QToolButton(); self.btn_portrait.setCheckable(True); self.btn_portrait.setText("纵向"); self.btn_portrait.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)); self.btn_portrait.setIconSize(QSize(20,20))
+        self.btn_landscape = QToolButton(); self.btn_landscape.setCheckable(True); self.btn_landscape.setText("横向"); self.btn_landscape.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)); self.btn_landscape.setIconSize(QSize(20,20))
+        self.group_orient = QButtonGroup(self)
+        self.group_orient.addButton(self.btn_portrait, 0)
+        self.group_orient.addButton(self.btn_landscape, 1)
+        self.group_orient.setExclusive(True)
+        self.btn_portrait.setChecked(True)
+        h_orient.addWidget(QLabel("纸张方向"))
+        h_orient.addStretch(1)
+        h_orient.addWidget(self.btn_portrait)
+        h_orient.addWidget(self.btn_landscape)
+        rb_layout.addLayout(h_orient)
+
+        # 根据方向动态更新“双页”卡片的副标题：纵向→上下布局；横向→左右布局
+        def update_two_tile_caption():
+            if self.btn_landscape.isChecked():
+                self.btn_layout_two_v.setText("双页\n左右布局")
+            else:
+                self.btn_layout_two_v.setText("双页\n上下布局")
+        # 初始刷新一次
+        update_two_tile_caption()
+        # 方向变化时刷新
+        try:
+            self.group_orient.idClicked.connect(lambda _id: update_two_tile_caption())
+        except Exception:
+            # 兜底：直接监听两个按钮的toggled
+            try:
+                self.btn_portrait.toggled.connect(lambda _checked: update_two_tile_caption())
+                self.btn_landscape.toggled.connect(lambda _checked: update_two_tile_caption())
+            except Exception:
+                pass
+
+        # 3) 每页发票数（影响布局：1张=ONE_UP；2张(左右)=TWO_UP_HORIZONTAL；4张=FOUR_UP）
+        h_count = QHBoxLayout()
+        h_count.addWidget(QLabel("每页发票数"))
+        self.btn_count_1 = QToolButton(); self.btn_count_1.setCheckable(True); self.btn_count_1.setText("1张")
+        self.btn_count_2h = QToolButton(); self.btn_count_2h.setCheckable(True); self.btn_count_2h.setText("2张")
+        self.btn_count_4 = QToolButton(); self.btn_count_4.setCheckable(True); self.btn_count_4.setText("4张 (2×2)")
+        for b in [self.btn_count_1, self.btn_count_2h, self.btn_count_4]:
+            b.setMinimumWidth(90)
+        self.group_count = QButtonGroup(self)
+        self.group_count.addButton(self.btn_count_1, 1)
+        self.group_count.addButton(self.btn_count_2h, 2)
+        self.group_count.addButton(self.btn_count_4, 4)
+        self.group_count.setExclusive(True)
+        self.btn_count_2h.setChecked(False)
+        self.btn_count_1.setChecked(False)
+        self.btn_count_4.setChecked(False)
+        h_count.addStretch(1)
+        h_count.addWidget(self.btn_count_1)
+        h_count.addWidget(self.btn_count_2h)
+        h_count.addWidget(self.btn_count_4)
+        # 包一层，便于动态隐藏/显示
+        self.count_wrap = QWidget()
+        self.count_wrap.setLayout(h_count)
+        rb_layout.addWidget(self.count_wrap)
+
+        # 4) 切割线
+        self.chk_cutline = QCheckBox("显示切割线")
+        rb_layout.addWidget(self.chk_cutline)
         layout_box.setLayout(rb_layout)
         opt_box = QGroupBox("选项")
         form = QFormLayout()
@@ -152,7 +253,13 @@ class MainWindow(QMainWindow):
         form.addRow("输出目录", w_out)
         opt_box.setLayout(form)
         self.combo_printer = QComboBox()
-        self.combo_printer.addItem("系统打印对话框")
+        self.combo_printer.addItem("默认打印机")
+        # 车票选项
+        ticket_box = QGroupBox("车票选项")
+        ticket_form = QFormLayout()
+        self.chk_ticket_duplicate = QCheckBox("一页重复两张")
+        ticket_form.addRow("重复排版", self.chk_ticket_duplicate)
+        ticket_box.setLayout(ticket_form)
         btns = QHBoxLayout()
         btns.setSpacing(12)
         self.btn_layout = QPushButton("🧩 排版")
@@ -164,6 +271,7 @@ class MainWindow(QMainWindow):
         right_inner.addWidget(layout_box)
         right_inner.addWidget(opt_box)
         right_inner.addWidget(self.combo_printer)
+        right_inner.addWidget(ticket_box)
         r_btns = QWidget()
         r_btns.setLayout(btns)
         right_inner.addWidget(r_btns)
@@ -186,6 +294,36 @@ class MainWindow(QMainWindow):
         self.btn_out.clicked.connect(self.on_choose_out)
         self.btn_layout.clicked.connect(self.on_layout)
         self.btn_print.clicked.connect(self.on_print)
+        # 同步：每页发票数 ↔ 卡片布局
+        def sync_from_count(id_: int):
+            # 任何“每页发票数”的选择都切换到“自定义”卡片，并显示该区域
+            self.btn_layout_custom.setChecked(True)
+            self.btn_layout_one.setChecked(False)
+            self.btn_layout_two_v.setChecked(False)
+            self.btn_layout_four.setChecked(False)
+            update_count_visibility()
+        self.group_count.idClicked.connect(sync_from_count)
+
+        def sync_from_tiles(id_: int):
+            # group_layout_tiles: 0=自定义(禁用),1=单页,2=双页上下,3=四页
+            if id_ == 1:
+                self.btn_count_1.setChecked(True)
+            elif id_ == 2:
+                self.btn_count_2h.setChecked(True)
+            elif id_ == 3:
+                self.btn_count_4.setChecked(True)
+        self.group_layout_tiles.idClicked.connect(sync_from_tiles)
+
+        # 动态显示/隐藏“每页发票数”：仅自定义时显示
+        def update_count_visibility():
+            checked_id = self.group_layout_tiles.checkedId()
+            # 0=自定义(禁用按钮但可将来启用)，1=单页，2=双页上下，3=四页
+            show = (checked_id == 0)
+            self.count_wrap.setVisible(show)
+        # 初始状态
+        update_count_visibility()
+        # 在卡片选择变化时更新
+        self.group_layout_tiles.idClicked.connect(lambda _id: update_count_visibility())
         
     def eventFilter(self, obj, event):
         try:
@@ -281,7 +419,7 @@ class MainWindow(QMainWindow):
     def on_import(self):
         dlg = QFileDialog(self)
         dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
-        dlg.setNameFilter("PDF (*.pdf)")
+        dlg.setNameFilter("文档 (*.pdf *.ofd *.xml)")
         if dlg.exec():
             self.add_paths(dlg.selectedFiles())
     def on_choose_out(self):
@@ -301,11 +439,96 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在排版与输出…")
         try:
             pages: List = []
+            any_ticket = False
+            suggested_orient: str | None = None
             for src in files:
-                r = read_pdf(src)
+                try:
+                    r = read_document(src)
+                except Exception:
+                    # 回退到 PDF
+                    r = read_pdf(src)
+                # 车票识别（按文件）
+                try:
+                    is_ticket, orient_hint = detect_ticket_document(r)
+                    if is_ticket:
+                        any_ticket = True
+                        # 记录一个方向建议（若多文件不一致，保留第一个）
+                        if not suggested_orient and orient_hint:
+                            suggested_orient = orient_hint
+                except Exception:
+                    pass
                 pages.extend(list(r.pages))
-            writer = two_up_vertical_pages(pages)
-            base_name = "merged_2up.pdf"
+            # 车票重复排版（自动识别触发）
+            if any_ticket:
+                self.chk_ticket_duplicate.setChecked(True)
+                # 预设“双页”卡片
+                self.btn_layout_two_v.setChecked(True)
+                self.btn_layout_one.setChecked(False)
+                self.btn_layout_four.setChecked(False)
+                # 根据建议方向设置
+                if suggested_orient == "landscape":
+                    self.btn_landscape.setChecked(True)
+                    self.btn_portrait.setChecked(False)
+                elif suggested_orient == "portrait":
+                    self.btn_portrait.setChecked(True)
+                    self.btn_landscape.setChecked(False)
+                # 同步更新“双页”卡片文字
+                try:
+                    update_two_tile_caption()
+                except Exception:
+                    pass
+                # 隐藏“每页发票数”保持与非自定义一致
+                try:
+                    self.count_wrap.setVisible(False)
+                except Exception:
+                    pass
+                # 状态提示
+                try:
+                    self.statusBar().showMessage("检测到车票：已启用重复两张并预设为 2-up", 5000)
+                except Exception:
+                    pass
+            ticket_duplicate = self.chk_ticket_duplicate.isChecked()
+            if ticket_duplicate:
+                # 将每页复制一份再进行左右或上下 2-up
+                dup_pages = []
+                for p in pages:
+                    dup_pages.extend([p, p])
+                pages = dup_pages
+            # 布局与方向（基于按钮组）
+            count_id = self.group_count.checkedId()
+            # 响应式映射：
+            # - 单页：仅看方向开关（仍用于旋转页以适应纸张），模式固定 ONE_UP
+            # - 双页：根据方向决定上下/左右；纵向→上下，横向→左右
+            # - 四页：固定 FOUR_UP
+            # - 自定义：显示“每页发票数”，用其决定 1/2(左右)/4
+
+            checked_tile = self.group_layout_tiles.checkedId()
+            if checked_tile == 1:  # 单页
+                mode = LayoutMode.ONE_UP
+            elif checked_tile == 2:  # 双页
+                mode = LayoutMode.TWO_UP_VERTICAL if self.btn_portrait.isChecked() else LayoutMode.TWO_UP_HORIZONTAL
+            elif checked_tile == 3:  # 四页
+                mode = LayoutMode.FOUR_UP
+            else:  # 自定义
+                if count_id == 1:
+                    mode = LayoutMode.ONE_UP
+                elif count_id == 2:
+                    mode = LayoutMode.TWO_UP_HORIZONTAL
+                elif count_id == 4:
+                    mode = LayoutMode.FOUR_UP
+                else:
+                    mode = LayoutMode.ONE_UP
+            orient = Orientation.PORTRAIT if self.btn_portrait.isChecked() else Orientation.LANDSCAPE
+            add_cut = self.chk_cutline.isChecked()
+            writer = compose_pages(pages, mode, orient, add_cut)
+            # 输出文件名根据模式命名
+            base_map = {
+                LayoutMode.ONE_UP: "merged_1up.pdf",
+                LayoutMode.TWO_UP_VERTICAL: "merged_2up_v.pdf",
+                LayoutMode.TWO_UP_HORIZONTAL: "merged_2up_h.pdf",
+                LayoutMode.FOUR_UP: "merged_4up.pdf",
+            }
+            base_name = base_map[mode]
             od = out_dir or os.path.dirname(files[0])
             out_path = os.path.join(od, base_name)
             write_writer(writer, out_path)

@@ -86,3 +86,25 @@ InvoiceLayoutAndPrinting/
 
 [![Star History Chart](https://api.star-history.com/svg?repos=Simon7612/InvoiceLayoutAndPrinting&type=date&legend=top-left)](https://www.star-history.com/#Simon7612/InvoiceLayoutAndPrinting&type=date&legend=top-left)
 
+[v0.0.2 计划与实现]
+
+- 页面排版扩展：
+  - 纸张方向可选：`纵向`/`横向`
+  - 布局模式：`一页一张`、`一页两张（上下）`、`一页两张（左右）`、`一页四张（2×2，固定横向）`
+  - 切割线：支持在合成页中间添加切割线（上下布局绘制水平线、左右布局绘制竖线、四宫格绘制十字线）
+- 车票打印：在“车票选项”中可选“`一页重复两张`”，用于同一车票的两连版排版（复用 2-up 算法）
+- OFD/XML 支持：内置纯 Python 转换（无需外部工具）
+  - OFD：优先使用 `ofdparser` 将 OFD 转为 PDF；若安装了 `easyofd` 也可作为备选
+    - 安装：`uv add ofdparser`（或 `uv add easyofd`）
+  - XML：支持解析 XML 中内嵌的 `base64` 负载（PDF 或 OFD）并转换为 PDF
+    - 若 XML 不包含内嵌 PDF/OFD 数据，则当前版本无法直接渲染
+  - GUI 导入已支持 `*.pdf *.ofd *.xml`；在未安装上述库时，OFD/XML 会提示安装方式
+
+### 使用说明（GUI）
+- 左侧导入列表添加发票/票据（可多选/拖拽），支持 `PDF/OFD/XML`
+- 右侧选择：`布局模式`、`纸张方向`、`添加中间切割线`、以及可选的`车票重复两张`
+- 点击“排版”生成输出，并在中间预览窗口展示；可选“排版后打印”直接调用系统打印
+- 输出文件命名示例：`merged_1up.pdf`、`merged_2up_v.pdf`、`merged_2up_h.pdf`、`merged_4up.pdf`
+
+### 命令行（CLI）
+- 原 CLI 仍支持 2-up（上下）批处理；新版高级布局优先通过 GUI 使用

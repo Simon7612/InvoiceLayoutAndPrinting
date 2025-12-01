@@ -1,3 +1,7 @@
+import warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"^ofdparser(\.|$)")
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"^easyofd(\.|$)")
+
 import argparse
 import os
 from readInvoice import collect_pdfs, read_pdf
