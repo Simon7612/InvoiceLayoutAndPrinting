@@ -71,6 +71,38 @@ def _print_with_sumatra(exe: str, path: str) -> bool:
     return _spawn([exe, "-print-dialog", "-exit-on-print", os.path.abspath(path)])
 
 
+def _print_direct(exe: str, path: str, printer: str) -> bool:
+    """SumatraPDF 直印到指定打印机（不经对话框）。"""
+    return _spawn([
+        exe, "-print-to", printer, "-exit-when-done", os.path.abspath(path),
+    ])
+
+
+def list_system_printers() -> list:
+    """枚举本机打印机名（注册表 Print\\Printers 子键，64 位视图）。"""
+    names: list = []
+    try:
+        import winreg
+
+        key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print\Printers"
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, key_path, 0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            i = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(key, i)
+                except OSError:
+                    break
+                i += 1
+                if sub and sub not in names:
+                    names.append(sub)
+    except Exception as e:
+        logger.debug("枚举打印机失败: %s", e)
+    return sorted(names)
+
+
 def _open_with_edge(exe: str, path: str) -> bool:
     # Edge 没有打印 CLI 参数；只能打开其查看器由用户在窗口内打印
     return _spawn([exe, os.path.abspath(path)])
@@ -127,14 +159,23 @@ def _open_viewer(path: str) -> bool:
         return False
 
 
-def print_pdf(path: str) -> None:
-    """弹出打印对话框（或兜底打开查看器），不阻塞调用方。"""
+def print_pdf(path: str, printer: str | None = None) -> None:
+    """弹出打印对话框（或兜底打开查看器），不阻塞调用方。
+
+    指定 printer 时走 SumatraPDF 直印（不经对话框）；未安装 SumatraPDF
+    则回退为打印对话框链路。
+    """
     if platform.system() != "Windows":
         raise RuntimeError("printing only supported on Windows")
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    # 1) SumatraPDF：真正的命令行打印对话框
+    # 0) 指定打印机：SumatraPDF 直接输出
     sumatra = _find_sumatra()
+    if printer:
+        if sumatra and _print_direct(sumatra, path, printer):
+            return
+        logger.warning("未找到 SumatraPDF，无法直接打印到 %s，回退为打印对话框", printer)
+    # 1) SumatraPDF：真正的命令行打印对话框
     if sumatra and _print_with_sumatra(sumatra, path):
         return
     # 2) 系统 "print" 动词：默认 PDF 程序的打印对话框

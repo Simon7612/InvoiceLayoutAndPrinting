@@ -33,3 +33,10 @@ def test_find_sumatra_returns_existing_path_or_none():
 def test_query_app_path_returns_existing_path_or_none():
     result = pi._query_app_path("msedge.exe")
     assert result is None or os.path.exists(result)
+
+
+def test_list_system_printers_returns_names():
+    printers = pi.list_system_printers()
+    assert isinstance(printers, list)
+    assert printers == sorted(set(printers))
+    assert all(isinstance(p, str) and p for p in printers)
