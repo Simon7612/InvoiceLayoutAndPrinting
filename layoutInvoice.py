@@ -1,5 +1,7 @@
 from typing import Optional, List
 from copy import deepcopy
+import logging
+
 from pypdf import PdfReader, PdfWriter
 from pypdf._page import PageObject
 from pypdf import Transformation
@@ -12,6 +14,8 @@ from pypdf.generic import (
     DecodedStreamObject,
 )
 
+logger = logging.getLogger(__name__)
+
 def _cropbox_metrics(p: PageObject) -> tuple[float, float, float, float]:
     cb = RectangleObject(p.cropbox)
     w = float(cb.width)
@@ -20,38 +24,11 @@ def _cropbox_metrics(p: PageObject) -> tuple[float, float, float, float]:
     bottom = float(cb.bottom)
     return w, h, left, bottom
 
-def _move_annots(src: PageObject, dst: PageObject, dx: float, dy: float) -> None:
-    try:
-        annots = src.get("/Annots")
-        if not annots:
-            return
-        for a in annots:
-            o = a.get_object()
-            r = RectangleObject(o["/Rect"])
-            llx, lly = r.lower_left
-            urx, ury = r.upper_right
-            new_rect = ArrayObject([
-                FloatObject(float(llx) + dx),
-                FloatObject(float(lly) + dy),
-                FloatObject(float(urx) + dx),
-                FloatObject(float(ury) + dy),
-            ])
-            new = DictionaryObject()
-            for k in o.keys():
-                if k == NameObject("/Rect"):
-                    new[k] = new_rect
-                else:
-                    new[k] = o[k]
-            dst.add_annotation(new)
-    except Exception:
-        pass
-
 def _adjust_merged_annots(dst: PageObject, n1: int, dx1: float, dy1: float, n2: int, dx2: float, dy2: float) -> None:
     ann = dst.get("/Annots")
     if not ann:
         return
     try:
-        total = len(ann)
         for idx, a in enumerate(ann):
             o = a.get_object()
             r = RectangleObject(o["/Rect"])
@@ -69,36 +46,12 @@ def _adjust_merged_annots(dst: PageObject, n1: int, dx1: float, dy1: float, n2: 
             ])
             o[NameObject("/Rect")] = new_rect
     except Exception:
-        pass
+        # 印章错位是本项目的核心修复点，失败必须留下可排查的痕迹
+        logger.warning("电子印章注释(/Annots)平移失败", exc_info=True)
 
 def two_up_vertical(reader: PdfReader) -> PdfWriter:
-    writer = PdfWriter()
-    pages = reader.pages
-    n = len(pages)
-    for i in range(0, n, 2):
-        p1 = pages[i]
-        w1, h1, l1, b1 = _cropbox_metrics(p1)
-        p2: Optional[PageObject] = pages[i + 1] if i + 1 < n else None
-        if p2 is not None:
-            w2, h2, l2, b2 = _cropbox_metrics(p2)
-        else:
-            w2, h2, l2, b2 = w1, h1, l1, b1
-        blank_w = max(w1, w2)
-        blank_h = h1 + h2
-        blank = PageObject.create_blank_page(width=blank_w, height=blank_h)
-        t1 = Transformation().translate(-l1, -b1 + (blank_h - h1))
-        blank.merge_transformed_page(p1, t1)
-        if p2 is not None:
-            t2 = Transformation().translate(-l2, -b2)
-            blank.merge_transformed_page(p2, t2)
-        _move_annots(p1, blank, -l1, (blank_h - h1))
-        writer.add_page(blank)
-        page = writer.pages[-1]
-        n1 = len(p1.get("/Annots") or [])
-        n2 = len(p2.get("/Annots") or []) if p2 is not None else 0
-        _adjust_merged_annots(page, n1, -l1, (blank_h - h1), n2, -l2 if p2 is not None else 0.0, 0.0)
-        
-    return writer
+    # 旧 CLI 入口：与 GUI 共用同一套 2-up 竖向合成实现
+    return two_up_vertical_pages(reader.pages)
 
 def two_up_vertical_pages(pages: List[PageObject]) -> PdfWriter:
     writer = PdfWriter()
@@ -119,12 +72,16 @@ def two_up_vertical_pages(pages: List[PageObject]) -> PdfWriter:
         if p2 is not None:
             t2 = Transformation().translate(-l2, -b2)
             blank.merge_transformed_page(p2, t2)
-        _move_annots(p1, blank, -l1, (blank_h - h1))
+        # merge_transformed_page 会原样复制 /Annots（电子印章），这里按与内容相同的
+        # 平移量把两页注释的 /Rect 平移到合成后的位置
         writer.add_page(blank)
         page = writer.pages[-1]
         n1 = len(p1.get("/Annots") or [])
         n2 = len(p2.get("/Annots") or []) if p2 is not None else 0
-        _adjust_merged_annots(page, n1, -l1, (blank_h - h1), n2, -l2 if p2 is not None else 0.0, 0.0)
+        _adjust_merged_annots(
+            page, n1, -l1, (blank_h - h1) - b1,
+            n2, -l2 if p2 is not None else 0.0, -b2 if p2 is not None else 0.0,
+        )
     return writer
 
 def one_up_pages(pages: List[PageObject]) -> PdfWriter:
@@ -162,12 +119,16 @@ def two_up_horizontal_pages(pages: List[PageObject]) -> PdfWriter:
         if p2 is not None:
             t2 = Transformation().translate(-l2 + w1, -b2)
             blank.merge_transformed_page(p2, t2)
-        _move_annots(p1, blank, -l1, -b1)
+        # merge_transformed_page 会原样复制 /Annots（电子印章），这里按与内容相同的
+        # 平移量把两页注释的 /Rect 平移到合成后的位置
         writer.add_page(blank)
         page = writer.pages[-1]
         n1 = len(p1.get("/Annots") or [])
         n2 = len(p2.get("/Annots") or []) if p2 is not None else 0
-        _adjust_merged_annots(page, n1, -l1, -b1, n2, -l2 if p2 is not None else 0.0, -b2 if p2 is not None else 0.0)
+        _adjust_merged_annots(
+            page, n1, -l1, -b1,
+            n2, (-l2 + w1) if p2 is not None else 0.0, -b2 if p2 is not None else 0.0,
+        )
     return writer
 
 def four_up_grid_pages(pages: List[PageObject]) -> PdfWriter:

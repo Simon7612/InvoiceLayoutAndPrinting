@@ -8,6 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# 样例发票与生成产物不入库
 *.pdf
+# 测试夹具例外（如需提交小型测试 PDF）
+!tests/**/*.pdf
 test/
 .idea
