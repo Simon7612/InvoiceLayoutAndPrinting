@@ -31,6 +31,13 @@ jobs:
       - name: Run basic import test (smoke test)
         run: python -c "import gui, layoutInvoice, printInvoice, readInvoice; print('All modules imported successfully')"
 
+      - name: Read version from pyproject
+        id: ver
+        shell: pwsh
+        run: |
+          $v = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          "product=$v" >> $env:GITHUB_OUTPUT
+
       - name: Build executable with Nuitka
         run: |
           python -m nuitka ^
@@ -38,6 +45,8 @@ jobs:
             --onefile ^
             --windows-disable-console ^
             --windows-icon-from-ico=icon.ico ^
+            --windows-product-version=${{ steps.ver.outputs.product }} ^
+            --windows-file-version=${{ steps.ver.outputs.product }} ^
             --include-package=PyQt6 ^
             --enable-plugin=pyqt6 ^
             --output-dir=dist ^
