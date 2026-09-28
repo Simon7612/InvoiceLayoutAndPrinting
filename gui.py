@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QToolButton,
     QStyle,
 )
-from PyQt6.QtCore import Qt, QSize, QEvent
+from PyQt6.QtCore import Qt, QSize, QEvent, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon
 import ctypes, sys
 from readInvoice import collect_pdfs, read_pdf, read_document, detect_ticket_document
@@ -79,6 +79,95 @@ class ImportDropArea(QWidget):
                 paths.append(p)
         if paths:
             self.on_dropped(paths)
+
+# 各布局模式对应的输出文件名（排版与打印共用）
+LAYOUT_OUTPUT_NAMES = {
+    LayoutMode.ONE_UP: "merged_1up.pdf",
+    LayoutMode.TWO_UP_VERTICAL: "merged_2up_v.pdf",
+    LayoutMode.TWO_UP_HORIZONTAL: "merged_2up_h.pdf",
+    LayoutMode.FOUR_UP: "merged_4up.pdf",
+}
+
+
+class _LoadWorker(QThread):
+    """后台线程：读取/转换文件（OFD/XML 转换较慢）并识别车票，避免阻塞 UI。"""
+
+    progress = pyqtSignal(int, int, str)      # (当前序号, 总数, 文件名)
+    ticket_detected = pyqtSignal(bool, str)   # (是否车票, 建议方向)
+    loaded = pyqtSignal(list)                 # [(源路径, PdfReader), ...]
+    failed = pyqtSignal(str)
+
+    def __init__(self, files: List[str], parent=None):
+        super().__init__(parent)
+        self._files = files
+
+    def run(self):
+        try:
+            readers = []
+            any_ticket = False
+            suggested = ""
+            total = len(self._files)
+            for i, src in enumerate(self._files, 1):
+                if self.isInterruptionRequested():
+                    return
+                self.progress.emit(i, total, os.path.basename(src))
+                try:
+                    r = read_document(src)
+                except Exception:
+                    # 回退到 PDF
+                    r = read_pdf(src)
+                try:
+                    is_ticket, orient_hint = detect_ticket_document(r)
+                    if is_ticket:
+                        any_ticket = True
+                        # 多文件方向建议不一致时保留第一个
+                        if not suggested and orient_hint:
+                            suggested = orient_hint
+                except Exception:
+                    pass
+                readers.append((src, r))
+            self.ticket_detected.emit(any_ticket, suggested)
+            self.loaded.emit(readers)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class _ComposeWorker(QThread):
+    """后台线程：页面合成、写出与打印。"""
+
+    progress = pyqtSignal(str)
+    composed = pyqtSignal(str)  # 输出文件路径
+    failed = pyqtSignal(str)
+
+    def __init__(self, pages, mode, orientation, add_cutlines, out_path,
+                 do_print: bool, copies: int, parent=None):
+        super().__init__(parent)
+        self._pages = pages
+        self._mode = mode
+        self._orientation = orientation
+        self._add_cutlines = add_cutlines
+        self._out_path = out_path
+        self._do_print = do_print
+        self._copies = copies
+
+    def run(self):
+        try:
+            self.progress.emit("正在排版合成…")
+            writer = compose_pages(self._pages, self._mode, self._orientation, self._add_cutlines)
+            self.progress.emit("正在写出文件…")
+            write_writer(writer, self._out_path)
+            if self._do_print:
+                for _ in range(self._copies):
+                    if self.isInterruptionRequested():
+                        break
+                    try:
+                        print_pdf(self._out_path)
+                    except Exception:
+                        pass
+            self.composed.emit(self._out_path)
+        except Exception as e:
+            self.failed.emit(str(e))
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -204,6 +293,8 @@ class MainWindow(QMainWindow):
                 self.btn_landscape.toggled.connect(lambda _checked: update_two_tile_caption())
             except Exception:
                 pass
+        # 供车票自动预设时调用（闭包绑定到实例）
+        self._update_two_tile_caption = update_two_tile_caption
 
         # 3) 每页发票数（影响布局：1张=ONE_UP；2张(左右)=TWO_UP_HORIZONTAL；4张=FOUR_UP）
         h_count = QHBoxLayout()
@@ -431,119 +522,104 @@ class MainWindow(QMainWindow):
         if not files:
             QMessageBox.warning(self, "提示", "请先导入发票")
             return
-        out_dir = self.line_out.text().strip() or None
-        do_print = self.chk_print.isChecked()
-        copies = self.spin_copies.value()
-        generated: List[str] = []
+        # 主线程先取齐所有设置，重活交给后台线程
+        self._layout_files = files
+        self._layout_out_dir = self.line_out.text().strip() or None
+        self._layout_do_print = self.chk_print.isChecked()
+        self._layout_copies = self.spin_copies.value()
         self.set_busy(True)
-        self.statusBar().showMessage("正在排版与输出…")
-        try:
-            pages: List = []
-            any_ticket = False
-            suggested_orient: str | None = None
-            for src in files:
-                try:
-                    r = read_document(src)
-                except Exception:
-                    # 回退到 PDF
-                    r = read_pdf(src)
-                # 车票识别（按文件）
-                try:
-                    is_ticket, orient_hint = detect_ticket_document(r)
-                    if is_ticket:
-                        any_ticket = True
-                        # 记录一个方向建议（若多文件不一致，保留第一个）
-                        if not suggested_orient and orient_hint:
-                            suggested_orient = orient_hint
-                except Exception:
-                    pass
-                pages.extend(list(r.pages))
-            # 车票重复排版（自动识别触发）
-            if any_ticket:
-                self.chk_ticket_duplicate.setChecked(True)
-                # 预设“双页”卡片
-                self.btn_layout_two_v.setChecked(True)
-                self.btn_layout_one.setChecked(False)
-                self.btn_layout_four.setChecked(False)
-                # 根据建议方向设置
-                if suggested_orient == "landscape":
-                    self.btn_landscape.setChecked(True)
-                    self.btn_portrait.setChecked(False)
-                elif suggested_orient == "portrait":
-                    self.btn_portrait.setChecked(True)
-                    self.btn_landscape.setChecked(False)
-                # 同步更新“双页”卡片文字
-                try:
-                    update_two_tile_caption()
-                except Exception:
-                    pass
-                # 隐藏“每页发票数”保持与非自定义一致
-                try:
-                    self.count_wrap.setVisible(False)
-                except Exception:
-                    pass
-                # 状态提示
-                try:
-                    self.statusBar().showMessage("检测到车票：已启用重复两张并预设为 2-up", 5000)
-                except Exception:
-                    pass
-            ticket_duplicate = self.chk_ticket_duplicate.isChecked()
-            if ticket_duplicate:
-                # 将每页复制一份再进行左右或上下 2-up
-                dup_pages = []
-                for p in pages:
-                    dup_pages.extend([p, p])
-                pages = dup_pages
-            # 布局与方向（基于按钮组）
-            count_id = self.group_count.checkedId()
-            # 响应式映射：
-            # - 单页：仅看方向开关（仍用于旋转页以适应纸张），模式固定 ONE_UP
-            # - 双页：根据方向决定上下/左右；纵向→上下，横向→左右
-            # - 四页：固定 FOUR_UP
-            # - 自定义：显示“每页发票数”，用其决定 1/2(左右)/4
+        self.statusBar().showMessage("正在读取/转换文件…")
+        # 阶段一：读取/转换 + 车票识别（OFD/XML 转换耗时）
+        self._load_worker = _LoadWorker(files, parent=self)
+        self._load_worker.progress.connect(self._on_load_progress)
+        self._load_worker.ticket_detected.connect(self._on_ticket_detected)
+        self._load_worker.loaded.connect(self._on_files_loaded)
+        self._load_worker.failed.connect(self._on_layout_failed)
+        self._load_worker.start()
 
-            checked_tile = self.group_layout_tiles.checkedId()
-            if checked_tile == 1:  # 单页
-                mode = LayoutMode.ONE_UP
-            elif checked_tile == 2:  # 双页
-                mode = LayoutMode.TWO_UP_VERTICAL if self.btn_portrait.isChecked() else LayoutMode.TWO_UP_HORIZONTAL
-            elif checked_tile == 3:  # 四页
-                mode = LayoutMode.FOUR_UP
-            else:  # 自定义
-                if count_id == 1:
-                    mode = LayoutMode.ONE_UP
-                elif count_id == 2:
-                    mode = LayoutMode.TWO_UP_HORIZONTAL
-                elif count_id == 4:
-                    mode = LayoutMode.FOUR_UP
-                else:
-                    mode = LayoutMode.ONE_UP
-            orient = Orientation.PORTRAIT if self.btn_portrait.isChecked() else Orientation.LANDSCAPE
-            add_cut = self.chk_cutline.isChecked()
-            writer = compose_pages(pages, mode, orient, add_cut)
-            # 输出文件名根据模式命名
-            base_map = {
-                LayoutMode.ONE_UP: "merged_1up.pdf",
-                LayoutMode.TWO_UP_VERTICAL: "merged_2up_v.pdf",
-                LayoutMode.TWO_UP_HORIZONTAL: "merged_2up_h.pdf",
-                LayoutMode.FOUR_UP: "merged_4up.pdf",
-            }
-            base_name = base_map[mode]
-            od = out_dir or os.path.dirname(files[0])
-            out_path = os.path.join(od, base_name)
-            write_writer(writer, out_path)
-            generated.append(out_path)
+    def _resolve_layout_mode(self) -> str:
+        """根据右侧卡片与方向选择解析布局模式。
+
+        - 单页卡片：固定 ONE_UP
+        - 双页卡片：纵向→上下，横向→左右
+        - 四页卡片：固定 FOUR_UP
+        - 自定义卡片：按“每页发票数”决定
+        """
+        checked_tile = self.group_layout_tiles.checkedId()
+        if checked_tile == 1:
+            return LayoutMode.ONE_UP
+        if checked_tile == 2:
+            return LayoutMode.TWO_UP_VERTICAL if self.btn_portrait.isChecked() else LayoutMode.TWO_UP_HORIZONTAL
+        if checked_tile == 3:
+            return LayoutMode.FOUR_UP
+        count_id = self.group_count.checkedId()
+        if count_id == 2:
+            return LayoutMode.TWO_UP_HORIZONTAL
+        if count_id == 4:
+            return LayoutMode.FOUR_UP
+        return LayoutMode.ONE_UP
+
+    def _on_load_progress(self, i: int, total: int, name: str):
+        self.statusBar().showMessage(f"正在读取/转换文件（{i}/{total}）：{name}")
+
+    def _on_ticket_detected(self, any_ticket: bool, suggested: str):
+        if not any_ticket:
+            return
+        # 自动勾选“重复两张”并预设 2-up 与建议方向（与原同步逻辑一致）
+        self.chk_ticket_duplicate.setChecked(True)
+        self.btn_layout_two_v.setChecked(True)
+        self.btn_layout_one.setChecked(False)
+        self.btn_layout_four.setChecked(False)
+        if suggested == "landscape":
+            self.btn_landscape.setChecked(True)
+            self.btn_portrait.setChecked(False)
+        elif suggested == "portrait":
+            self.btn_portrait.setChecked(True)
+            self.btn_landscape.setChecked(False)
+        self._update_two_tile_caption()
+        # 隐藏“每页发票数”保持与非自定义一致
+        self.count_wrap.setVisible(False)
+        self.statusBar().showMessage("检测到车票：已启用重复两张并预设为 2-up", 5000)
+
+    def _on_files_loaded(self, readers: list):
+        pages: List = []
+        for _src, r in readers:
+            pages.extend(list(r.pages))
+        if self.chk_ticket_duplicate.isChecked():
+            # 将每页复制一份再进行左右或上下 2-up
+            dup_pages: List = []
+            for p in pages:
+                dup_pages.extend([p, p])
+            pages = dup_pages
+        # 布局与方向映射见 _resolve_layout_mode
+        mode = self._resolve_layout_mode()
+        orient = Orientation.PORTRAIT if self.btn_portrait.isChecked() else Orientation.LANDSCAPE
+        add_cut = self.chk_cutline.isChecked()
+        od = self._layout_out_dir or os.path.dirname(self._layout_files[0])
+        out_path = os.path.join(od, LAYOUT_OUTPUT_NAMES[mode])
+        # 阶段二：合成、写出与打印
+        self._compose_worker = _ComposeWorker(
+            pages, mode, orient, add_cut, out_path,
+            self._layout_do_print, self._layout_copies, parent=self,
+        )
+        self._compose_worker.progress.connect(self.statusBar().showMessage)
+        self._compose_worker.composed.connect(self._on_composed)
+        self._compose_worker.failed.connect(self._on_layout_failed)
+        self._compose_worker.start()
+
+    def _on_composed(self, out_path: str):
+        self.set_busy(False)
+        self.statusBar().clearMessage()
+        try:
             self.load_preview(out_path)
-            if do_print:
-                for _ in range(copies):
-                    try:
-                        print_pdf(out_path)
-                    except Exception:
-                        pass
-        finally:
-            self.set_busy(False)
-            self.statusBar().clearMessage()
-        QMessageBox.information(self, "完成", f"已生成 {len(generated)} 个文件")
+        except Exception:
+            pass
+        QMessageBox.information(self, "完成", f"已生成 {out_path}")
+
+    def _on_layout_failed(self, message: str):
+        self.set_busy(False)
+        self.statusBar().clearMessage()
+        QMessageBox.critical(self, "排版失败", message)
     def on_print(self):
         files = self.get_files()
         if not files:
@@ -551,7 +627,8 @@ class MainWindow(QMainWindow):
             return
         out_dir = self.line_out.text().strip() or None
         od = out_dir or os.path.dirname(files[0])
-        target = os.path.join(od, "merged_2up.pdf")
+        # 按当前选择的布局模式定位排版输出文件
+        target = os.path.join(od, LAYOUT_OUTPUT_NAMES[self._resolve_layout_mode()])
         if not os.path.exists(target):
             QMessageBox.information(self, "提示", "未找到排版后的文件，请先排版")
             return
@@ -575,6 +652,16 @@ class MainWindow(QMainWindow):
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         else:
             QApplication.restoreOverrideCursor()
+
+    def closeEvent(self, event):
+        # 后台线程仍在读取/排版时，先请求中断并等待当前文件处理完，
+        # 避免线程随窗口销毁导致的崩溃
+        for attr in ("_load_worker", "_compose_worker"):
+            worker = getattr(self, attr, None)
+            if worker is not None and worker.isRunning():
+                worker.requestInterruption()
+                worker.wait()
+        event.accept()
 
     def load_preview(self, path: str):
         self.pdf_doc.load(path)
