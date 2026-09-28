@@ -4,7 +4,8 @@ import base64
 import tempfile
 import warnings
 from typing import List, Optional, Tuple
-from xml.etree import ElementTree as ET
+
+from defusedxml import ElementTree as SafeET
 from pypdf import PdfReader
 warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"^ofdparser(\.|$)")
 warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"^easyofd(\.|$)")
@@ -25,7 +26,6 @@ except Exception:
 
 v0.0.2：支持 PDF；OFD/XML 直接转换（优先纯 Python 方案）。
 """
-#TODO: 支持ofd和xml文件, 目前只支持pdf文件
 def collect_pdfs(path: str) -> List[str]:
     """收集指定路径下的发票文件（PDF/OFD/XML）。"""
     def _accept(name: str) -> bool:
@@ -113,7 +113,8 @@ def _extract_embedded_payload_from_xml(xml_path: str) -> Tuple[Optional[bytes], 
 
     返回 (payload_bytes, payload_type)，若未找到则 (None, None)。
     """
-    tree = ET.parse(xml_path)
+    # 发票 XML 来自外部来源：用 defusedxml 防御实体膨胀（billion laughs）等攻击
+    tree = SafeET.parse(xml_path)
     root = tree.getroot()
 
     # 遍历所有节点文本，尝试 base64 解码并识别

@@ -102,6 +102,21 @@ def test_read_document_xml_without_payload_raises(tmp_path):
         read_document(str(f))
 
 
+def test_read_document_xml_rejects_entity_expansion(tmp_path):
+    # defusedxml 必须在解析阶段拒绝 DTD 实体（billion laughs 类攻击）
+    from defusedxml.common import EntitiesForbidden
+
+    bomb = (
+        '<?xml version="1.0"?>\n'
+        f'<!DOCTYPE invoice [<!ENTITY a "{"A" * 64}">]>\n'
+        "<invoice><pdf>&a;&a;&a;&a;&a;&a;&a;&a;</pdf></invoice>"
+    )
+    f = tmp_path / "bomb.xml"
+    f.write_text(bomb, encoding="ascii")
+    with pytest.raises(EntitiesForbidden):
+        read_document(str(f))
+
+
 # ---------------- detect_ticket_document ----------------
 
 def test_detect_ticket_matches_keywords_and_orientation():
