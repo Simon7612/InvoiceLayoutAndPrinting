@@ -159,39 +159,50 @@ def _open_viewer(path: str) -> bool:
         return False
 
 
-def print_pdf(path: str, printer: str | None = None) -> None:
+def _startfile_print(path: str) -> bool:
+    try:
+        os.startfile(path, "print")
+        return True
+    except Exception as e:
+        logger.debug("os.startfile print 失败: %s", e)
+        return False
+
+
+def _default_strategies(path: str, printer: str | None) -> list:
+    """按优先级构建打印策略链；每个策略成功交付（或弹出对话框）返回 True。
+
+    指定 printer 时优先 SumatraPDF 直印；未安装 SumatraPDF 则回退打印对话框链路。
+    """
+    sumatra = _find_sumatra()
+    if printer and not sumatra:
+        logger.warning("未找到 SumatraPDF，无法直接打印到 %s，回退为打印对话框", printer)
+    strategies: list = []
+    if printer and sumatra:
+        strategies.append(lambda: _print_direct(sumatra, path, printer))
+    if sumatra:
+        strategies.append(lambda: _print_with_sumatra(sumatra, path))
+    strategies.append(lambda: _shell_execute_print(path))
+    strategies.append(lambda: _powershell_print(path))
+    strategies.append(lambda: _startfile_print(path))
+    edge = _find_edge()
+    if edge:
+        strategies.append(lambda: _open_with_edge(edge, path))
+    strategies.append(lambda: _open_viewer(path))
+    return strategies
+
+
+def print_pdf(path: str, printer: str | None = None,
+              strategies: list | None = None) -> None:
     """弹出打印对话框（或兜底打开查看器），不阻塞调用方。
 
-    指定 printer 时走 SumatraPDF 直印（不经对话框）；未安装 SumatraPDF
-    则回退为打印对话框链路。
+    strategies 可注入（每项为 () -> bool，按序尝试直到成功）用于测试；
+    缺省按 _default_strategies 构建本机可用链路。
     """
     if platform.system() != "Windows":
         raise RuntimeError("printing only supported on Windows")
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    # 0) 指定打印机：SumatraPDF 直接输出
-    sumatra = _find_sumatra()
-    if printer:
-        if sumatra and _print_direct(sumatra, path, printer):
+    for strategy in (strategies if strategies is not None else _default_strategies(path, printer)):
+        if strategy():
             return
-        logger.warning("未找到 SumatraPDF，无法直接打印到 %s，回退为打印对话框", printer)
-    # 1) SumatraPDF：真正的命令行打印对话框
-    if sumatra and _print_with_sumatra(sumatra, path):
-        return
-    # 2) 系统 "print" 动词：默认 PDF 程序的打印对话框
-    if _shell_execute_print(path):
-        return
-    if _powershell_print(path):
-        return
-    try:
-        os.startfile(path, "print")
-        return
-    except Exception as e:
-        logger.debug("os.startfile print 失败: %s", e)
-    # 3) 兜底：打开查看器由用户手动打印
-    edge = _find_edge()
-    if edge and _open_with_edge(edge, path):
-        return
-    if _open_viewer(path):
-        return
     raise RuntimeError("failed to show print dialog; viewer open also failed")

@@ -45,15 +45,16 @@
 - 预览：排版完成后自动加载合并文件，多页滚动查看
 
 ## 技术细节
+- 分层：`pipeline.py` 承载 CLI 与 GUI 共用的编排（读取/转换 → 车票识别 → 合成 → 写出 → 打印），不依赖 Qt；`main.py` 的批处理与 `gui_workers.py` 的后台线程都是它的调用方，流水线只定义一次
 - 合成逻辑在 `layoutInvoice.py`：
   - `two_up_vertical_pages(pages)` 按两页一组竖向合成；宽度取两页最大值，高度为两页高度和
   - 使用每页的 `cropbox` 对齐坐标系，保证不同来源 PDF 的布局一致
   - 对 PDF 注释（`/Annots`，如电子印章）进行同步平移与复制，确保印章位置在合成后仍处于票头处
-- GUI 在 `gui.py`：
+- GUI 在 `gui.py`（主窗口组装），后台线程与偏好持久化拆分在 `gui_workers.py` / `gui_preferences.py` / `gui_widgets.py`：
   - 文件列表使用 `QListWidget` 自定义行控件，支持拖拽排序、系统图标删除按钮
   - 预览使用 `QPdfDocument` + `QPdfView`，启用 `MultiPage` 模式与 `FitToWidth`
 - 打印在 `printInvoice.py`：
-  - 优先 SumatraPDF 的命令行打印对话框（支持便携版放在 exe 旁）；其次系统 `print` 动词/PowerShell，Edge 与默认查看器兜底
+  - 优先 SumatraPDF 的命令行打印对话框（支持便携版放在 exe 旁）；其次系统 `print` 动词/PowerShell，Edge 与默认查看器兜底；策略链以 `strategies` 参数注入，便于测试
   - 所有外部程序均以非阻塞方式启动，不卡界面
 
 ## 常见问题
@@ -66,10 +67,14 @@
 ## 目录结构
 ```
 InvoiceLayoutAndPrinting/
-├─ gui.py                 # 图形界面
+├─ gui.py                 # 主窗口组装与入口（MainWindow、run_gui）
+├─ gui_workers.py         # GUI 后台线程（读取/合成，薄封装 pipeline）
+├─ gui_preferences.py     # QSettings 偏好持久化
+├─ gui_widgets.py         # 可复用小部件（拖拽导入区）
+├─ pipeline.py            # CLI/GUI 共用编排（读取 → 识别 → 合成 → 写出 → 打印）
 ├─ main.py                # CLI 与 GUI 入口
 ├─ layoutInvoice.py       # 合成与注释处理逻辑
-├─ printInvoice.py        # 打印实现
+├─ printInvoice.py        # 打印实现（可注入策略链）
 ├─ readInvoice.py         # 读取与收集 PDF
 ├─ Makefile               # 构建与打包
 ├─ pyproject.toml         # 依赖与项目配置

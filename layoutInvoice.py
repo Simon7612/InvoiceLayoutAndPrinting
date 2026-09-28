@@ -243,7 +243,10 @@ class Orientation:
     PORTRAIT = "portrait"
     LANDSCAPE = "landscape"
 
-def _rotate_pages_for_orientation(pages: List[PageObject], orientation: str) -> List[PageObject]:
+def _rotate_pages_for_orientation(pages: List[PageObject], orientation: Optional[str]) -> List[PageObject]:
+    if orientation is None:
+        # None 表示不做方向预处理（CLI 批处理保持旧的合成结果）
+        return list(pages)
     out: List[PageObject] = []
     for p in pages:
         w, h, _left, _bottom = _cropbox_metrics(p)
@@ -260,7 +263,7 @@ def _rotate_pages_for_orientation(pages: List[PageObject], orientation: str) -> 
         out.append(p)
     return out
 
-def compose_pages(pages: List[PageObject], layout_mode: str, orientation: str,
+def compose_pages(pages: List[PageObject], layout_mode: str, orientation: Optional[str],
                   add_cutlines: bool, grid: Optional[List[int]] = None) -> PdfWriter:
     # 方向预处理：仅对单页/重复场景有意义；对合成页尺寸影响有限，尽量保持输入页方向一致
     pages2 = _rotate_pages_for_orientation(pages, orientation)

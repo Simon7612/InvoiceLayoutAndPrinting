@@ -1,42 +1,42 @@
-"""main.py CLI 批处理流程的单元测试（不触发打印）。"""
-import io
-
-from pypdf import PdfReader, PdfWriter
+"""main.py 参数分发测试（批处理编排已在 pipeline，见 test_pipeline.py）。"""
+import sys
 
 import main as main_mod
+import pipeline
 
 
-def _single_page_pdf() -> bytes:
-    writer = PdfWriter()
-    writer.add_blank_page(width=200, height=100)
-    buf = io.BytesIO()
-    writer.write(buf)
-    return buf.getvalue()
+def test_main_cli_dispatches_to_process(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        pipeline, "process",
+        lambda i, o, p: calls.update(input=i, output=o, do_print=p),
+    )
+    monkeypatch.setattr(sys, "argv", ["main.py", "-i", "a", "-o", "b", "--no-print"])
+    main_mod.main()
+    assert calls == {"input": "a", "output": "b", "do_print": False}
 
 
-def test_process_batch_two_up(tmp_path):
-    src = tmp_path / "src"
-    src.mkdir()
-    for i in range(2):
-        (src / f"inv{i}.pdf").write_bytes(_single_page_pdf())
-    out = tmp_path / "out"
-    out.mkdir()
-
-    main_mod.process(str(src), str(out), do_print=False)
-
-    outputs = sorted(out.glob("*_2up.pdf"))
-    assert [f.name for f in outputs] == ["inv0_2up.pdf", "inv1_2up.pdf"]
-    for f in outputs:
-        # 单页文件 2-up 后仍是 1 页
-        assert len(PdfReader(str(f)).pages) == 1
+def test_main_print_enabled_by_default(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        pipeline, "process",
+        lambda i, o, p: calls.update(do_print=p),
+    )
+    monkeypatch.setattr(sys, "argv", ["main.py", "-i", "a"])
+    main_mod.main()
+    assert calls == {"do_print": True}
 
 
-def test_process_output_defaults_to_source_dir(tmp_path):
-    f = tmp_path / "one.pdf"
-    f.write_bytes(_single_page_pdf())
-
-    main_mod.process(str(f), None, do_print=False)
-
-    out = tmp_path / "one_2up.pdf"
-    assert out.exists()
-    assert len(PdfReader(str(out)).pages) == 1
+def test_main_gui_flag_and_missing_input_enter_gui(monkeypatch):
+    calls = {"gui": 0, "process": 0}
+    monkeypatch.setattr(main_mod, "run_gui", lambda: calls.__setitem__("gui", calls["gui"] + 1))
+    monkeypatch.setattr(
+        pipeline, "process",
+        lambda *a: calls.__setitem__("process", calls["process"] + 1),
+    )
+    monkeypatch.setattr(sys, "argv", ["main.py", "--gui"])
+    main_mod.main()
+    # 无 -i 时也直接进 GUI
+    monkeypatch.setattr(sys, "argv", ["main.py"])
+    main_mod.main()
+    assert calls == {"gui": 2, "process": 0}

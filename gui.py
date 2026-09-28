@@ -5,7 +5,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 from typing import List
 
-from PyQt6.QtCore import Qt, QSize, QEvent, QThread, QSettings, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QFormLayout,
+    QGridLayout,
+    QButtonGroup,
     QSpinBox,
     QCheckBox,
     QLineEdit,
@@ -31,147 +33,15 @@ from PyQt6.QtWidgets import (
     QStyle,
 )
 from PyQt6.QtGui import QIcon
-from readInvoice import collect_pdfs, read_pdf, read_document, detect_ticket_document
-from layoutInvoice import (
-    write_writer,
-    compose_pages,
-    LayoutMode,
-    Orientation,
-)
+from readInvoice import collect_pdfs
+from layoutInvoice import LayoutMode, Orientation
 from printInvoice import print_pdf, list_system_printers
+from pipeline import ComposeJob, output_name
+from gui_widgets import ImportDropArea
+from gui_workers import ComposeWorker, LoadWorker
+from gui_preferences import Preferences
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtPdfWidgets import QPdfView
-
-class DropArea(QWidget):
-    def __init__(self, on_dropped):
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.label = QLabel("预览窗口\n请从左侧上传发票文件查看预览")
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout = QVBoxLayout()
-        layout.addWidget(self.label)
-        self.setLayout(layout)
-        self.on_dropped = on_dropped
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-    def dropEvent(self, e):
-        paths: List[str] = []
-        for url in e.mimeData().urls():
-            p = url.toLocalFile()
-            if p:
-                paths.append(p)
-        if paths:
-            self.on_dropped(paths)
-
-class ImportDropArea(QWidget):
-    def __init__(self, on_dropped):
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.on_dropped = on_dropped
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-    def dropEvent(self, e):
-        paths: List[str] = []
-        for url in e.mimeData().urls():
-            p = url.toLocalFile()
-            if p:
-                paths.append(p)
-        if paths:
-            self.on_dropped(paths)
-
-# 各布局模式对应的输出文件名（排版与打印共用）
-LAYOUT_OUTPUT_NAMES = {
-    LayoutMode.ONE_UP: "merged_1up.pdf",
-    LayoutMode.TWO_UP_VERTICAL: "merged_2up_v.pdf",
-    LayoutMode.TWO_UP_HORIZONTAL: "merged_2up_h.pdf",
-    LayoutMode.FOUR_UP: "merged_4up.pdf",
-}
-
-
-class _LoadWorker(QThread):
-    """后台线程：读取/转换文件（OFD/XML 转换较慢）并识别车票，避免阻塞 UI。"""
-
-    progress = pyqtSignal(int, int, str)      # (当前序号, 总数, 文件名)
-    ticket_detected = pyqtSignal(bool, str)   # (是否车票, 建议方向)
-    loaded = pyqtSignal(list)                 # [(源路径, PdfReader), ...]
-    failed = pyqtSignal(str)
-
-    def __init__(self, files: List[str], parent=None):
-        super().__init__(parent)
-        self._files = files
-
-    def run(self):
-        try:
-            readers = []
-            any_ticket = False
-            suggested = ""
-            total = len(self._files)
-            for i, src in enumerate(self._files, 1):
-                if self.isInterruptionRequested():
-                    return
-                self.progress.emit(i, total, os.path.basename(src))
-                try:
-                    r = read_document(src)
-                except Exception:
-                    # 回退到 PDF
-                    r = read_pdf(src)
-                try:
-                    is_ticket, orient_hint = detect_ticket_document(r)
-                    if is_ticket:
-                        any_ticket = True
-                        # 多文件方向建议不一致时保留第一个
-                        if not suggested and orient_hint:
-                            suggested = orient_hint
-                except Exception:
-                    pass
-                readers.append((src, r))
-            self.ticket_detected.emit(any_ticket, suggested)
-            self.loaded.emit(readers)
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-class _ComposeWorker(QThread):
-    """后台线程：页面合成、写出与打印。"""
-
-    progress = pyqtSignal(str)
-    composed = pyqtSignal(str)  # 输出文件路径
-    failed = pyqtSignal(str)
-
-    def __init__(self, pages, mode, orientation, add_cutlines, out_path,
-                 do_print: bool, copies: int, printer: str | None = None,
-                 grid: List[int] | None = None, parent=None):
-        super().__init__(parent)
-        self._pages = pages
-        self._mode = mode
-        self._orientation = orientation
-        self._add_cutlines = add_cutlines
-        self._out_path = out_path
-        self._do_print = do_print
-        self._copies = copies
-        self._printer = printer
-        self._grid = grid
-
-    def run(self):
-        try:
-            self.progress.emit("正在排版合成…")
-            writer = compose_pages(self._pages, self._mode, self._orientation,
-                                   self._add_cutlines, grid=self._grid)
-            self.progress.emit("正在写出文件…")
-            write_writer(writer, self._out_path)
-            if self._do_print:
-                for _ in range(self._copies):
-                    if self.isInterruptionRequested():
-                        break
-                    try:
-                        print_pdf(self._out_path, self._printer)
-                    except Exception:
-                        pass
-            self.composed.emit(self._out_path)
-        except Exception as e:
-            self.failed.emit(str(e))
 
 
 class MainWindow(QMainWindow):
@@ -257,7 +127,6 @@ class MainWindow(QMainWindow):
         layout_box = QGroupBox("排版方式")
         rb_layout = QVBoxLayout()
         # 1) 卡片式布局选择
-        from PyQt6.QtWidgets import QGridLayout, QButtonGroup
         grid = QGridLayout()
         grid.setSpacing(8)
 
@@ -315,25 +184,17 @@ class MainWindow(QMainWindow):
         rb_layout.addLayout(h_orient)
 
         # 根据方向动态更新“双页”卡片的副标题：纵向→上下布局；横向→左右布局
-        def update_two_tile_caption():
-            if self.btn_landscape.isChecked():
-                self.btn_layout_two_v.setText("双页\n左右布局")
-            else:
-                self.btn_layout_two_v.setText("双页\n上下布局")
-        # 初始刷新一次
-        update_two_tile_caption()
+        self.update_two_tile_caption()
         # 方向变化时刷新
         try:
-            self.group_orient.idClicked.connect(lambda _id: update_two_tile_caption())
+            self.group_orient.idClicked.connect(lambda _id: self.update_two_tile_caption())
         except Exception:
             # 兜底：直接监听两个按钮的toggled
             try:
-                self.btn_portrait.toggled.connect(lambda _checked: update_two_tile_caption())
-                self.btn_landscape.toggled.connect(lambda _checked: update_two_tile_caption())
+                self.btn_portrait.toggled.connect(lambda _checked: self.update_two_tile_caption())
+                self.btn_landscape.toggled.connect(lambda _checked: self.update_two_tile_caption())
             except Exception:
                 pass
-        # 供车票自动预设时调用（闭包绑定到实例）
-        self._update_two_tile_caption = update_two_tile_caption
 
         # 3) 自定义网格：行 × 列（每页张数 = 行×列，逐页缩放填入单元格）
         h_grid = QHBoxLayout()
@@ -425,18 +286,12 @@ class MainWindow(QMainWindow):
         self.btn_layout.clicked.connect(self.on_layout)
         self.btn_print.clicked.connect(self.on_print)
         # 动态显示/隐藏“网格 行×列”：仅自定义卡片时显示
-        def update_grid_visibility():
-            checked_id = self.group_layout_tiles.checkedId()
-            # 0=自定义，1=单页，2=双页上下，3=四页
-            self.grid_wrap.setVisible(checked_id == 0)
-        # 初始状态
-        update_grid_visibility()
-        # 在卡片选择变化时更新
-        self.group_layout_tiles.idClicked.connect(lambda _id: update_grid_visibility())
-        self._update_grid_visibility = update_grid_visibility
-        # 恢复上次使用的偏好（窗口尺寸、布局、打印设置等）
-        self._load_settings()
-        
+        self.update_grid_visibility()
+        self.group_layout_tiles.idClicked.connect(lambda _id: self.update_grid_visibility())
+        # 偏好恢复（窗口尺寸、布局、打印设置等）；内部会同步派生 UI 状态
+        self._prefs = Preferences(self)
+        self._prefs.restore()
+
     def eventFilter(self, obj, event):
         try:
             if obj is self.list_files and event.type() == QEvent.Type.Resize:
@@ -444,6 +299,17 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return False
+
+    def update_two_tile_caption(self) -> None:
+        """按纸张方向同步“双页”卡片副标题（纵向→上下布局；横向→左右布局）。"""
+        if self.btn_landscape.isChecked():
+            self.btn_layout_two_v.setText("双页\n左右布局")
+        else:
+            self.btn_layout_two_v.setText("双页\n上下布局")
+
+    def update_grid_visibility(self) -> None:
+        """仅自定义布局卡片（id=0）时显示“网格 行×列”。"""
+        self.grid_wrap.setVisible(self.group_layout_tiles.checkedId() == 0)
 
     def _update_list_item_widths(self) -> None:
         vw = self.list_files.viewport().width()
@@ -552,7 +418,7 @@ class MainWindow(QMainWindow):
         self.set_busy(True)
         self.statusBar().showMessage("正在读取/转换文件…")
         # 阶段一：读取/转换 + 车票识别（OFD/XML 转换耗时）
-        self._load_worker = _LoadWorker(files, parent=self)
+        self._load_worker = LoadWorker(files, parent=self)
         self._load_worker.progress.connect(self._on_load_progress)
         self._load_worker.ticket_detected.connect(self._on_ticket_detected)
         self._load_worker.loaded.connect(self._on_files_loaded)
@@ -577,9 +443,7 @@ class MainWindow(QMainWindow):
         return LayoutMode.CUSTOM_GRID
 
     def _output_name(self, mode: str) -> str:
-        if mode == LayoutMode.CUSTOM_GRID:
-            return f"merged_grid{self.spin_grid_rows.value()}x{self.spin_grid_cols.value()}.pdf"
-        return LAYOUT_OUTPUT_NAMES[mode]
+        return output_name(mode, [self.spin_grid_rows.value(), self.spin_grid_cols.value()])
 
     def _selected_printer(self) -> str | None:
         """下拉框第一项为“默认打印机”（弹窗），其余为直印目标。"""
@@ -637,7 +501,7 @@ class MainWindow(QMainWindow):
         elif suggested == "portrait":
             self.btn_portrait.setChecked(True)
             self.btn_landscape.setChecked(False)
-        self._update_two_tile_caption()
+        self.update_two_tile_caption()
         # 隐藏“网格 行×列”保持与非自定义一致
         self.grid_wrap.setVisible(False)
         self.statusBar().showMessage("检测到车票：已启用重复两张并预设为 2-up", 5000)
@@ -654,19 +518,23 @@ class MainWindow(QMainWindow):
             pages = dup_pages
         # 布局与方向映射见 _resolve_layout_mode
         mode = self._resolve_layout_mode()
-        orient = Orientation.PORTRAIT if self.btn_portrait.isChecked() else Orientation.LANDSCAPE
-        add_cut = self.chk_cutline.isChecked()
-        od = self._layout_out_dir or os.path.dirname(self._layout_files[0])
-        out_path = os.path.join(od, self._output_name(mode))
         grid = None
         if mode == LayoutMode.CUSTOM_GRID:
             grid = [self.spin_grid_rows.value(), self.spin_grid_cols.value()]
-        # 阶段二：合成、写出与打印
-        self._compose_worker = _ComposeWorker(
-            pages, mode, orient, add_cut, out_path,
-            self._layout_do_print, self._layout_copies,
-            printer=self._layout_printer, grid=grid, parent=self,
+        od = self._layout_out_dir or os.path.dirname(self._layout_files[0])
+        job = ComposeJob(
+            pages=pages,
+            mode=mode,
+            orientation=Orientation.PORTRAIT if self.btn_portrait.isChecked() else Orientation.LANDSCAPE,
+            add_cutlines=self.chk_cutline.isChecked(),
+            grid=grid,
+            out_path=os.path.join(od, self._output_name(mode)),
+            do_print=self._layout_do_print,
+            copies=self._layout_copies,
+            printer=self._layout_printer,
         )
+        # 阶段二：合成、写出与打印
+        self._compose_worker = ComposeWorker(job, parent=self)
         self._compose_worker.progress.connect(self.statusBar().showMessage)
         self._compose_worker.composed.connect(self._on_composed)
         self._compose_worker.failed.connect(self._on_layout_failed)
@@ -705,8 +573,8 @@ class MainWindow(QMainWindow):
             for _ in range(copies):
                 try:
                     print_pdf(target, printer)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.getLogger(__name__).warning("打印失败 %s: %s", target, e)
         finally:
             self.set_busy(False)
             self.statusBar().clearMessage()
@@ -720,7 +588,7 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def closeEvent(self, event):
-        self._save_settings()
+        self._prefs.save()
         # 后台线程仍在读取/排版时，先请求中断并等待当前文件处理完，
         # 避免线程随窗口销毁导致的崩溃
         for attr in ("_load_worker", "_compose_worker"):
@@ -729,62 +597,6 @@ class MainWindow(QMainWindow):
                 worker.requestInterruption()
                 worker.wait()
         event.accept()
-
-    SETTINGS_ORG = "Simon Chan"
-    SETTINGS_APP = "InvoiceLayoutAndPrinting"
-
-    def _load_settings(self):
-        s = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
-        try:
-            geo = s.value("window/geometry")
-            if geo is not None:
-                self.restoreGeometry(geo)
-        except Exception:
-            pass
-        try:
-            tile = s.value("layout/tile", 1, type=int)
-            if tile == 0:
-                self.btn_layout_custom.setChecked(True)
-            elif tile == 1:
-                self.btn_layout_one.setChecked(True)
-            elif tile == 2:
-                self.btn_layout_two_v.setChecked(True)
-            elif tile == 3:
-                self.btn_layout_four.setChecked(True)
-            if s.value("layout/portrait", True, type=bool):
-                self.btn_portrait.setChecked(True)
-            else:
-                self.btn_landscape.setChecked(True)
-            self.chk_cutline.setChecked(s.value("layout/cutlines", False, type=bool))
-            self.spin_grid_rows.setValue(s.value("layout/grid_rows", 2, type=int))
-            self.spin_grid_cols.setValue(s.value("layout/grid_cols", 2, type=int))
-            self.spin_copies.setValue(s.value("print/copies", 1, type=int))
-            self.chk_print.setChecked(s.value("print/after_layout", False, type=bool))
-            self.line_out.setText(s.value("paths/output_dir", "", type=str))
-            idx = s.value("print/printer_index", 0, type=int)
-            if 0 <= idx < self.combo_printer.count():
-                self.combo_printer.setCurrentIndex(idx)
-        except Exception:
-            pass
-        # 同步派生 UI 状态（程序化 setChecked 不触发 idClicked）
-        try:
-            self._update_two_tile_caption()
-            self._update_grid_visibility()
-        except Exception:
-            pass
-
-    def _save_settings(self):
-        s = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
-        s.setValue("window/geometry", self.saveGeometry())
-        s.setValue("layout/tile", self.group_layout_tiles.checkedId())
-        s.setValue("layout/portrait", self.btn_portrait.isChecked())
-        s.setValue("layout/cutlines", self.chk_cutline.isChecked())
-        s.setValue("layout/grid_rows", self.spin_grid_rows.value())
-        s.setValue("layout/grid_cols", self.spin_grid_cols.value())
-        s.setValue("print/copies", self.spin_copies.value())
-        s.setValue("print/after_layout", self.chk_print.isChecked())
-        s.setValue("print/printer_index", self.combo_printer.currentIndex())
-        s.setValue("paths/output_dir", self.line_out.text().strip())
 
     def load_preview(self, path: str):
         self.pdf_doc.load(path)

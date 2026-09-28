@@ -29,7 +29,7 @@ jobs:
         run: python -m pytest -q
 
       - name: Run basic import test (smoke test)
-        run: python -c "import gui, layoutInvoice, printInvoice, readInvoice; print('All modules imported successfully')"
+        run: python -c "import gui, pipeline, layoutInvoice, printInvoice, readInvoice; print('All modules imported successfully')"
 
       - name: Read version from pyproject
         id: ver

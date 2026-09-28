@@ -4,30 +4,12 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"^easyofd(\.|$
 
 import argparse
 import logging
-import os
 
-from readInvoice import collect_pdfs, read_document
-from layoutInvoice import two_up_vertical, write_writer
-from printInvoice import print_pdf
+import pipeline
 from gui import run_gui
 
 logger = logging.getLogger(__name__)
 
-def process(input_path: str, output_dir: str | None, do_print: bool) -> None:
-    pdfs = collect_pdfs(input_path)
-    for src in pdfs:
-        reader = read_document(src)
-        writer = two_up_vertical(reader)
-        name = os.path.splitext(os.path.basename(src))[0] + "_2up.pdf"
-        out_dir = output_dir or os.path.dirname(src)
-        out_path = os.path.join(out_dir, name)
-        write_writer(writer, out_path)
-        logger.info("已生成 %s", out_path)
-        if do_print:
-            try:
-                print_pdf(out_path)
-            except Exception as e:
-                logger.error("打印失败 %s: %s", out_path, e)
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -42,7 +24,9 @@ def main() -> None:
     if args.gui or not args.input:
         run_gui()
         return
-    process(args.input, args.output, not args.no_print)
+    # 批处理编排（读取 → 2-up 合成 → 写出 → 打印）在 pipeline.process
+    pipeline.process(args.input, args.output, not args.no_print)
+
 
 if __name__ == "__main__":
     main()
