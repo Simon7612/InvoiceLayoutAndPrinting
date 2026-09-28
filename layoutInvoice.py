@@ -1,5 +1,4 @@
 from typing import Optional, List
-from copy import deepcopy
 import logging
 
 from pypdf import PdfReader, PdfWriter
@@ -7,7 +6,6 @@ from pypdf._page import PageObject
 from pypdf import Transformation
 from pypdf.generic import (
     RectangleObject,
-    DictionaryObject,
     NameObject,
     ArrayObject,
     FloatObject,
@@ -131,38 +129,75 @@ def two_up_horizontal_pages(pages: List[PageObject]) -> PdfWriter:
         )
     return writer
 
-def four_up_grid_pages(pages: List[PageObject]) -> PdfWriter:
-    """四宫格（2×2）排版，固定为横向布局。
+def _transform_annots(dst: PageObject, start: int, count: int,
+                      sx: float, sy: float, dx: float, dy: float) -> None:
+    """对 dst 上 [start, start+count) 范围的注释矩形做仿射变换：x' = sx*x + dx。
 
-    简化实现：按首页尺寸创建目标页，并对每个源页进行 0.5 缩放后分别放置到四个象限。
-    注：此实现未缩放注释；若需支持注释缩放，需对 /Annots 中的矩形坐标按比例调整。
+    merge_transformed_page 复制注释时保留原始坐标，缩放类布局（宫格）
+    需要在合并后按与内容相同的变换修正 /Rect。
     """
+    ann = dst.get("/Annots")
+    if not ann:
+        return
+    try:
+        for a in list(ann)[start:start + count]:
+            o = a.get_object()
+            r = RectangleObject(o["/Rect"])
+            llx, lly = r.lower_left
+            urx, ury = r.upper_right
+            o[NameObject("/Rect")] = ArrayObject([
+                FloatObject(float(llx) * sx + dx),
+                FloatObject(float(lly) * sy + dy),
+                FloatObject(float(urx) * sx + dx),
+                FloatObject(float(ury) * sy + dy),
+            ])
+    except Exception:
+        # 印章错位是本项目的核心修复点，失败必须留下可排查的痕迹
+        logger.warning("电子印章注释(/Annots)变换失败", exc_info=True)
+
+
+def grid_pages(pages: List[PageObject], rows: int, cols: int) -> PdfWriter:
+    """rows×cols 宫格排版：每张源页等比缩放到单元格内完整显示。
+
+    单元格尺寸取每组首页；不足一组时重复最后一页填充。
+    注释(/Annots，电子印章)随内容做相同的缩放平移。
+    """
+    if rows < 1 or cols < 1:
+        raise ValueError("grid rows/cols must be >= 1")
     writer = PdfWriter()
     n = len(pages)
+    per_sheet = rows * cols
     i = 0
     while i < n:
-        # 使用第一个页面的尺寸作为基准
-        p1 = pages[i]
-        w, h, l, b = _cropbox_metrics(p1)
-        blank_w = w * 2
-        blank_h = h * 2
-        blank = PageObject.create_blank_page(width=blank_w, height=blank_h)
-        # 放置四个页面，若不足四页则重复最后一页
-        group = [pages[j] if j < n else pages[n - 1] for j in [i, i + 1, i + 2, i + 3]]
-        positions = [
-            (0.0, h),        # 左上
-            (w, h),          # 右上
-            (0.0, 0.0),      # 左下
-            (w, 0.0),        # 右下
-        ]
-        for idx, (pg, (tx, ty)) in enumerate(zip(group, positions)):
+        w, h, _, _ = _cropbox_metrics(pages[i])
+        sheet_w, sheet_h = w * cols, h * rows
+        blank = PageObject.create_blank_page(width=sheet_w, height=sheet_h)
+        group = [pages[j] if j < n else pages[n - 1] for j in range(i, i + per_sheet)]
+        specs = []
+        for idx, pg in enumerate(group):
             pw, ph, pl, pb = _cropbox_metrics(pg)
-            # 统一按 0.5 缩放；偏移到对应象限
-            t = Transformation().scale(0.5, 0.5).translate(-pl + tx, -pb + ty)
-            blank.merge_transformed_page(pg, t)
+            row, col = divmod(idx, cols)
+            s = min(w / pw, h / ph)
+            cell_x = col * w
+            cell_y = sheet_h - (row + 1) * h  # row 0 在最上面
+            dx = cell_x - s * pl
+            dy = cell_y - s * pb
+            specs.append((s, dx, dy, len(pg.get("/Annots") or [])))
+            blank.merge_transformed_page(pg, Transformation().scale(s, s).translate(dx, dy))
         writer.add_page(blank)
-        i += 4
+        page = writer.pages[-1]
+        start = 0
+        for s, dx, dy, cnt in specs:
+            if cnt:
+                _transform_annots(page, start, cnt, s, s, dx, dy)
+            start += cnt
+        i += per_sheet
     return writer
+
+
+def four_up_grid_pages(pages: List[PageObject]) -> PdfWriter:
+    """四宫格（2×2）排版，固定为横向布局。"""
+    return grid_pages(pages, 2, 2)
 
 # --- 切割线与布局调度 ---
 
@@ -178,7 +213,8 @@ def _append_content_stream(page: PageObject, data: bytes) -> None:
     else:
         page[NameObject("/Contents")] = new_stream
 
-def _draw_center_lines(page: PageObject, vertical: bool = False, horizontal: bool = False) -> None:
+def _draw_cut_lines(page: PageObject, vertical_fracs: List[float], horizontal_fracs: List[float]) -> None:
+    """按宽度/高度比例绘制竖线与横线切割线。"""
     cb = RectangleObject(page.cropbox)
     w = float(cb.width)
     h = float(cb.height)
@@ -187,11 +223,11 @@ def _draw_center_lines(page: PageObject, vertical: bool = False, horizontal: boo
         "0 0 0 RG",   # stroke color: black
         "0.8 w",      # line width
     ]
-    if vertical:
-        x = w / 2.0
+    for f in vertical_fracs:
+        x = w * f
         parts += [f"{x:.2f} {margin:.2f} m", f"{x:.2f} {h - margin:.2f} l", "S"]
-    if horizontal:
-        y = h / 2.0
+    for f in horizontal_fracs:
+        y = h * f
         parts += [f"{margin:.2f} {y:.2f} m", f"{w - margin:.2f} {y:.2f} l", "S"]
     content = ("\n".join(parts) + "\n").encode("ascii")
     _append_content_stream(page, content)
@@ -201,6 +237,7 @@ class LayoutMode:
     TWO_UP_VERTICAL = "two_up_vertical"
     TWO_UP_HORIZONTAL = "two_up_horizontal"
     FOUR_UP = "four_up"
+    CUSTOM_GRID = "custom_grid"
 
 class Orientation:
     PORTRAIT = "portrait"
@@ -209,7 +246,7 @@ class Orientation:
 def _rotate_pages_for_orientation(pages: List[PageObject], orientation: str) -> List[PageObject]:
     out: List[PageObject] = []
     for p in pages:
-        w, h, l, b = _cropbox_metrics(p)
+        w, h, _left, _bottom = _cropbox_metrics(p)
         if orientation == Orientation.LANDSCAPE and h > w:
             try:
                 p = p.rotate(90)  # pypdf 支持 rotate/rotate_clockwise
@@ -223,27 +260,33 @@ def _rotate_pages_for_orientation(pages: List[PageObject], orientation: str) -> 
         out.append(p)
     return out
 
-def compose_pages(pages: List[PageObject], layout_mode: str, orientation: str, add_cutlines: bool) -> PdfWriter:
+def compose_pages(pages: List[PageObject], layout_mode: str, orientation: str,
+                  add_cutlines: bool, grid: Optional[List[int]] = None) -> PdfWriter:
     # 方向预处理：仅对单页/重复场景有意义；对合成页尺寸影响有限，尽量保持输入页方向一致
     pages2 = _rotate_pages_for_orientation(pages, orientation)
     if layout_mode == LayoutMode.ONE_UP:
         writer = one_up_pages(pages2)
+        cut = ([], [])
     elif layout_mode == LayoutMode.TWO_UP_VERTICAL:
         writer = two_up_vertical_pages(pages2)
+        cut = ([], [0.5])
     elif layout_mode == LayoutMode.TWO_UP_HORIZONTAL:
         writer = two_up_horizontal_pages(pages2)
+        cut = ([0.5], [])
     elif layout_mode == LayoutMode.FOUR_UP:
         writer = four_up_grid_pages(pages2)
+        cut = ([0.5], [0.5])
+    elif layout_mode == LayoutMode.CUSTOM_GRID:
+        if not grid or len(grid) != 2 or int(grid[0]) < 1 or int(grid[1]) < 1:
+            raise ValueError("custom grid layout requires (rows, cols)")
+        rows, cols = int(grid[0]), int(grid[1])
+        writer = grid_pages(pages2, rows, cols)
+        cut = ([c / cols for c in range(1, cols)], [r / rows for r in range(1, rows)])
     else:
         raise ValueError(f"unknown layout mode: {layout_mode}")
     if add_cutlines:
         for pg in writer.pages:
-            if layout_mode == LayoutMode.TWO_UP_VERTICAL:
-                _draw_center_lines(pg, horizontal=True)
-            elif layout_mode == LayoutMode.TWO_UP_HORIZONTAL:
-                _draw_center_lines(pg, vertical=True)
-            elif layout_mode == LayoutMode.FOUR_UP:
-                _draw_center_lines(pg, vertical=True, horizontal=True)
+            _draw_cut_lines(pg, *cut)
     return writer
 
 def write_writer(writer: PdfWriter, output_path: str) -> None:

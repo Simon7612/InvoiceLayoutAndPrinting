@@ -4,7 +4,6 @@
 注释（/Annots，即电子印章）平移是本项目修复过的核心行为，相关用例
 锁定的期望值即“印章与页面内容保持相对静止”。
 """
-import base64
 import io
 
 import pytest
@@ -25,6 +24,7 @@ from layoutInvoice import (
     Orientation,
     compose_pages,
     four_up_grid_pages,
+    grid_pages,
     one_up_pages,
     two_up_horizontal_pages,
     two_up_vertical,
@@ -151,6 +151,72 @@ def test_four_up_grid_page_count(n_input, n_output):
 def test_four_up_grid_dimensions():
     out = four_up_grid_pages([make_page(100, 50) for _ in range(4)])
     assert cropbox_size(out.pages[0]) == (200.0, 100.0)
+
+
+def test_four_up_grid_transforms_annots_to_quadrants():
+    # 同尺寸页面在 2×2 网格中不缩放（填满单元格），印章随内容平移到对应象限
+    pages = [make_page(100, 50, annot_rect=[10, 10, 20, 20]) for _ in range(4)]
+    out = four_up_grid_pages(pages)
+    assert annot_rects(out.pages[0]) == [
+        (10.0, 60.0, 20.0, 70.0),    # 左上（row0, col0）
+        (110.0, 60.0, 120.0, 70.0),  # 右上
+        (10.0, 10.0, 20.0, 20.0),    # 左下
+        (110.0, 10.0, 120.0, 20.0),  # 右下
+    ]
+
+
+def test_grid_scales_oversized_pages_to_fit_cell():
+    # 单元格取首页尺寸（100×50）；第二页 200×100 缩放 0.5 适配
+    pages = [
+        make_page(100, 50, annot_rect=[10, 5, 60, 20]),
+        make_page(200, 100, annot_rect=[10, 10, 20, 20]),
+    ]
+    out = grid_pages(pages, 1, 2)
+    assert cropbox_size(out.pages[0]) == (200.0, 50.0)
+    assert annot_rects(out.pages[0]) == [(10.0, 5.0, 60.0, 20.0), (105.0, 5.0, 110.0, 10.0)]
+
+
+# ---------------- 通用网格 ----------------
+
+def test_grid_one_by_two_keeps_scale_one():
+    pages = [make_page(100, 50, annot_rect=[10, 5, 60, 20]) for _ in range(2)]
+    out = grid_pages(pages, 1, 2)
+    assert len(out.pages) == 1
+    assert cropbox_size(out.pages[0]) == (200.0, 50.0)
+    assert annot_rects(out.pages[0]) == [(10.0, 5.0, 60.0, 20.0), (110.0, 5.0, 160.0, 20.0)]
+
+
+@pytest.mark.parametrize("n_input, rows, cols, n_output", [(7, 3, 2, 2), (13, 2, 3, 3), (1, 2, 2, 1)])
+def test_grid_page_count_and_fill(n_input, rows, cols, n_output):
+    out = grid_pages([make_page(100, 50) for _ in range(n_input)], rows, cols)
+    assert len(out.pages) == n_output
+
+
+def test_grid_rejects_invalid_shape():
+    with pytest.raises(ValueError):
+        grid_pages([make_page(100, 50)], 0, 2)
+
+
+def test_compose_custom_grid_requires_valid_grid():
+    pages = [make_page(100, 50)]
+    with pytest.raises(ValueError):
+        compose_pages(pages, LayoutMode.CUSTOM_GRID, Orientation.PORTRAIT, False)
+    with pytest.raises(ValueError):
+        compose_pages(pages, LayoutMode.CUSTOM_GRID, Orientation.PORTRAIT, False, grid=[0, 2])
+
+
+def test_compose_custom_grid_dimensions_and_cutlines(tmp_path):
+    pages = [make_page(100, 50) for _ in range(6)]
+    out = compose_pages(pages, LayoutMode.CUSTOM_GRID, Orientation.PORTRAIT, True, grid=[2, 3])
+    assert len(out.pages) == 1
+    assert cropbox_size(out.pages[0]) == (300.0, 100.0)
+    path = tmp_path / "grid.pdf"
+    write_writer(out, str(path))
+    reader = PdfReader(str(path))
+    data = ContentStream(reader.pages[0]["/Contents"], reader).get_data()
+    # 2 行 3 列：内部竖线 2 条 + 横线 1 条
+    assert data.count(b" l\n") == 3
+    assert b"0 0 0 RG" in data
 
 
 # ---------------- compose_pages 调度 ----------------
