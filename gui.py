@@ -1,5 +1,11 @@
+import ctypes
+import logging
 import os
+import sys
+from logging.handlers import RotatingFileHandler
 from typing import List
+
+from PyQt6.QtCore import Qt, QSize, QEvent, QThread, QSettings, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -14,7 +20,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QFileDialog,
     QGroupBox,
-    QRadioButton,
     QFormLayout,
     QSpinBox,
     QCheckBox,
@@ -25,19 +30,15 @@ from PyQt6.QtWidgets import (
     QToolButton,
     QStyle,
 )
-from PyQt6.QtCore import Qt, QSize, QEvent, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon
-import ctypes, sys
 from readInvoice import collect_pdfs, read_pdf, read_document, detect_ticket_document
 from layoutInvoice import (
-    two_up_vertical,
-    two_up_vertical_pages,
     write_writer,
     compose_pages,
     LayoutMode,
     Orientation,
 )
-from printInvoice import print_pdf
+from printInvoice import print_pdf, list_system_printers
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtPdfWidgets import QPdfView
 
@@ -140,7 +141,8 @@ class _ComposeWorker(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, pages, mode, orientation, add_cutlines, out_path,
-                 do_print: bool, copies: int, parent=None):
+                 do_print: bool, copies: int, printer: str | None = None,
+                 grid: List[int] | None = None, parent=None):
         super().__init__(parent)
         self._pages = pages
         self._mode = mode
@@ -149,11 +151,14 @@ class _ComposeWorker(QThread):
         self._out_path = out_path
         self._do_print = do_print
         self._copies = copies
+        self._printer = printer
+        self._grid = grid
 
     def run(self):
         try:
             self.progress.emit("正在排版合成…")
-            writer = compose_pages(self._pages, self._mode, self._orientation, self._add_cutlines)
+            writer = compose_pages(self._pages, self._mode, self._orientation,
+                                   self._add_cutlines, grid=self._grid)
             self.progress.emit("正在写出文件…")
             write_writer(writer, self._out_path)
             if self._do_print:
@@ -161,7 +166,7 @@ class _ComposeWorker(QThread):
                     if self.isInterruptionRequested():
                         break
                     try:
-                        print_pdf(self._out_path)
+                        print_pdf(self._out_path, self._printer)
                     except Exception:
                         pass
             self.composed.emit(self._out_path)
@@ -217,7 +222,33 @@ class MainWindow(QMainWindow):
             self.pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
         except Exception:
             pass
+        # 预览工具条：缩放与页码
+        bar = QHBoxLayout()
+        self.btn_zoom_out = QToolButton()
+        self.btn_zoom_out.setText("－")
+        self.btn_zoom_out.setToolTip("缩小")
+        self.btn_zoom_fit = QToolButton()
+        self.btn_zoom_fit.setText("适应宽度")
+        self.btn_zoom_in = QToolButton()
+        self.btn_zoom_in.setText("＋")
+        self.btn_zoom_in.setToolTip("放大")
+        self.label_page = QLabel("未加载文档")
+        bar.addWidget(self.btn_zoom_out)
+        bar.addWidget(self.btn_zoom_fit)
+        bar.addWidget(self.btn_zoom_in)
+        bar.addStretch(1)
+        bar.addWidget(self.label_page)
+        center_layout.addLayout(bar)
         center_layout.addWidget(self.pdf_view)
+        self.btn_zoom_in.clicked.connect(lambda: self._zoom_preview(1.25))
+        self.btn_zoom_out.clicked.connect(lambda: self._zoom_preview(0.8))
+        self.btn_zoom_fit.clicked.connect(self._zoom_fit_preview)
+        try:
+            self.pdf_view.pageNavigator().currentPageChanged.connect(
+                lambda _page: self._update_page_label()
+            )
+        except Exception:
+            pass
         center_box.setLayout(center_layout)
         right = QWidget()
         right_layout = QVBoxLayout()
@@ -262,8 +293,16 @@ class MainWindow(QMainWindow):
 
         # 2) 纸张方向（纵向/横向）
         h_orient = QHBoxLayout()
-        self.btn_portrait = QToolButton(); self.btn_portrait.setCheckable(True); self.btn_portrait.setText("纵向"); self.btn_portrait.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)); self.btn_portrait.setIconSize(QSize(20,20))
-        self.btn_landscape = QToolButton(); self.btn_landscape.setCheckable(True); self.btn_landscape.setText("横向"); self.btn_landscape.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)); self.btn_landscape.setIconSize(QSize(20,20))
+        self.btn_portrait = QToolButton()
+        self.btn_portrait.setCheckable(True)
+        self.btn_portrait.setText("纵向")
+        self.btn_portrait.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
+        self.btn_portrait.setIconSize(QSize(20, 20))
+        self.btn_landscape = QToolButton()
+        self.btn_landscape.setCheckable(True)
+        self.btn_landscape.setText("横向")
+        self.btn_landscape.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
+        self.btn_landscape.setIconSize(QSize(20, 20))
         self.group_orient = QButtonGroup(self)
         self.group_orient.addButton(self.btn_portrait, 0)
         self.group_orient.addButton(self.btn_landscape, 1)
@@ -296,30 +335,25 @@ class MainWindow(QMainWindow):
         # 供车票自动预设时调用（闭包绑定到实例）
         self._update_two_tile_caption = update_two_tile_caption
 
-        # 3) 每页发票数（影响布局：1张=ONE_UP；2张(左右)=TWO_UP_HORIZONTAL；4张=FOUR_UP）
-        h_count = QHBoxLayout()
-        h_count.addWidget(QLabel("每页发票数"))
-        self.btn_count_1 = QToolButton(); self.btn_count_1.setCheckable(True); self.btn_count_1.setText("1张")
-        self.btn_count_2h = QToolButton(); self.btn_count_2h.setCheckable(True); self.btn_count_2h.setText("2张")
-        self.btn_count_4 = QToolButton(); self.btn_count_4.setCheckable(True); self.btn_count_4.setText("4张 (2×2)")
-        for b in [self.btn_count_1, self.btn_count_2h, self.btn_count_4]:
-            b.setMinimumWidth(90)
-        self.group_count = QButtonGroup(self)
-        self.group_count.addButton(self.btn_count_1, 1)
-        self.group_count.addButton(self.btn_count_2h, 2)
-        self.group_count.addButton(self.btn_count_4, 4)
-        self.group_count.setExclusive(True)
-        self.btn_count_2h.setChecked(False)
-        self.btn_count_1.setChecked(False)
-        self.btn_count_4.setChecked(False)
-        h_count.addStretch(1)
-        h_count.addWidget(self.btn_count_1)
-        h_count.addWidget(self.btn_count_2h)
-        h_count.addWidget(self.btn_count_4)
+        # 3) 自定义网格：行 × 列（每页张数 = 行×列，逐页缩放填入单元格）
+        h_grid = QHBoxLayout()
+        h_grid.addWidget(QLabel("网格 行 × 列"))
+        self.spin_grid_rows = QSpinBox()
+        self.spin_grid_rows.setRange(1, 5)
+        self.spin_grid_rows.setValue(2)
+        self.spin_grid_cols = QSpinBox()
+        self.spin_grid_cols.setRange(1, 5)
+        self.spin_grid_cols.setValue(2)
+        for s in (self.spin_grid_rows, self.spin_grid_cols):
+            s.setMinimumWidth(60)
+        h_grid.addStretch(1)
+        h_grid.addWidget(self.spin_grid_rows)
+        h_grid.addWidget(QLabel("×"))
+        h_grid.addWidget(self.spin_grid_cols)
         # 包一层，便于动态隐藏/显示
-        self.count_wrap = QWidget()
-        self.count_wrap.setLayout(h_count)
-        rb_layout.addWidget(self.count_wrap)
+        self.grid_wrap = QWidget()
+        self.grid_wrap.setLayout(h_grid)
+        rb_layout.addWidget(self.grid_wrap)
 
         # 4) 切割线
         self.chk_cutline = QCheckBox("显示切割线")
@@ -345,6 +379,11 @@ class MainWindow(QMainWindow):
         opt_box.setLayout(form)
         self.combo_printer = QComboBox()
         self.combo_printer.addItem("默认打印机")
+        try:
+            for name in list_system_printers():
+                self.combo_printer.addItem(name)
+        except Exception:
+            pass
         # 车票选项
         ticket_box = QGroupBox("车票选项")
         ticket_form = QFormLayout()
@@ -385,36 +424,18 @@ class MainWindow(QMainWindow):
         self.btn_out.clicked.connect(self.on_choose_out)
         self.btn_layout.clicked.connect(self.on_layout)
         self.btn_print.clicked.connect(self.on_print)
-        # 同步：每页发票数 ↔ 卡片布局
-        def sync_from_count(id_: int):
-            # 任何“每页发票数”的选择都切换到“自定义”卡片，并显示该区域
-            self.btn_layout_custom.setChecked(True)
-            self.btn_layout_one.setChecked(False)
-            self.btn_layout_two_v.setChecked(False)
-            self.btn_layout_four.setChecked(False)
-            update_count_visibility()
-        self.group_count.idClicked.connect(sync_from_count)
-
-        def sync_from_tiles(id_: int):
-            # group_layout_tiles: 0=自定义(禁用),1=单页,2=双页上下,3=四页
-            if id_ == 1:
-                self.btn_count_1.setChecked(True)
-            elif id_ == 2:
-                self.btn_count_2h.setChecked(True)
-            elif id_ == 3:
-                self.btn_count_4.setChecked(True)
-        self.group_layout_tiles.idClicked.connect(sync_from_tiles)
-
-        # 动态显示/隐藏“每页发票数”：仅自定义时显示
-        def update_count_visibility():
+        # 动态显示/隐藏“网格 行×列”：仅自定义卡片时显示
+        def update_grid_visibility():
             checked_id = self.group_layout_tiles.checkedId()
-            # 0=自定义(禁用按钮但可将来启用)，1=单页，2=双页上下，3=四页
-            show = (checked_id == 0)
-            self.count_wrap.setVisible(show)
+            # 0=自定义，1=单页，2=双页上下，3=四页
+            self.grid_wrap.setVisible(checked_id == 0)
         # 初始状态
-        update_count_visibility()
+        update_grid_visibility()
         # 在卡片选择变化时更新
-        self.group_layout_tiles.idClicked.connect(lambda _id: update_count_visibility())
+        self.group_layout_tiles.idClicked.connect(lambda _id: update_grid_visibility())
+        self._update_grid_visibility = update_grid_visibility
+        # 恢复上次使用的偏好（窗口尺寸、布局、打印设置等）
+        self._load_settings()
         
     def eventFilter(self, obj, event):
         try:
@@ -527,6 +548,7 @@ class MainWindow(QMainWindow):
         self._layout_out_dir = self.line_out.text().strip() or None
         self._layout_do_print = self.chk_print.isChecked()
         self._layout_copies = self.spin_copies.value()
+        self._layout_printer = self._selected_printer()
         self.set_busy(True)
         self.statusBar().showMessage("正在读取/转换文件…")
         # 阶段一：读取/转换 + 车票识别（OFD/XML 转换耗时）
@@ -543,7 +565,7 @@ class MainWindow(QMainWindow):
         - 单页卡片：固定 ONE_UP
         - 双页卡片：纵向→上下，横向→左右
         - 四页卡片：固定 FOUR_UP
-        - 自定义卡片：按“每页发票数”决定
+        - 自定义卡片：按“网格 行×列”决定
         """
         checked_tile = self.group_layout_tiles.checkedId()
         if checked_tile == 1:
@@ -552,12 +574,42 @@ class MainWindow(QMainWindow):
             return LayoutMode.TWO_UP_VERTICAL if self.btn_portrait.isChecked() else LayoutMode.TWO_UP_HORIZONTAL
         if checked_tile == 3:
             return LayoutMode.FOUR_UP
-        count_id = self.group_count.checkedId()
-        if count_id == 2:
-            return LayoutMode.TWO_UP_HORIZONTAL
-        if count_id == 4:
-            return LayoutMode.FOUR_UP
-        return LayoutMode.ONE_UP
+        return LayoutMode.CUSTOM_GRID
+
+    def _output_name(self, mode: str) -> str:
+        if mode == LayoutMode.CUSTOM_GRID:
+            return f"merged_grid{self.spin_grid_rows.value()}x{self.spin_grid_cols.value()}.pdf"
+        return LAYOUT_OUTPUT_NAMES[mode]
+
+    def _selected_printer(self) -> str | None:
+        """下拉框第一项为“默认打印机”（弹窗），其余为直印目标。"""
+        if self.combo_printer.currentIndex() <= 0:
+            return None
+        return self.combo_printer.currentText()
+
+    def _zoom_preview(self, factor: float):
+        try:
+            self.pdf_view.setZoomMode(QPdfView.ZoomMode.Custom)
+            self.pdf_view.setZoomFactor(self.pdf_view.zoomFactor() * factor)
+        except Exception:
+            pass
+
+    def _zoom_fit_preview(self):
+        try:
+            self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        except Exception:
+            pass
+
+    def _update_page_label(self):
+        try:
+            n = self.pdf_doc.pageCount()
+            if n <= 0:
+                self.label_page.setText("未加载文档")
+                return
+            current = self.pdf_view.pageNavigator().currentPage()
+            self.label_page.setText(f"第 {current + 1} / {n} 页")
+        except Exception:
+            pass
 
     def _on_load_progress(self, i: int, total: int, name: str):
         self.statusBar().showMessage(f"正在读取/转换文件（{i}/{total}）：{name}")
@@ -565,7 +617,16 @@ class MainWindow(QMainWindow):
     def _on_ticket_detected(self, any_ticket: bool, suggested: str):
         if not any_ticket:
             return
-        # 自动勾选“重复两张”并预设 2-up 与建议方向（与原同步逻辑一致）
+        reply = QMessageBox.question(
+            self, "检测到车票",
+            "识别到车票样式。是否启用“一页重复两张”并预设为双页排版？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.statusBar().showMessage("检测到车票：保持当前排版设置", 5000)
+            return
+        # 自动勾选“重复两张”并预设 2-up 与建议方向
         self.chk_ticket_duplicate.setChecked(True)
         self.btn_layout_two_v.setChecked(True)
         self.btn_layout_one.setChecked(False)
@@ -577,8 +638,8 @@ class MainWindow(QMainWindow):
             self.btn_portrait.setChecked(True)
             self.btn_landscape.setChecked(False)
         self._update_two_tile_caption()
-        # 隐藏“每页发票数”保持与非自定义一致
-        self.count_wrap.setVisible(False)
+        # 隐藏“网格 行×列”保持与非自定义一致
+        self.grid_wrap.setVisible(False)
         self.statusBar().showMessage("检测到车票：已启用重复两张并预设为 2-up", 5000)
 
     def _on_files_loaded(self, readers: list):
@@ -596,11 +657,15 @@ class MainWindow(QMainWindow):
         orient = Orientation.PORTRAIT if self.btn_portrait.isChecked() else Orientation.LANDSCAPE
         add_cut = self.chk_cutline.isChecked()
         od = self._layout_out_dir or os.path.dirname(self._layout_files[0])
-        out_path = os.path.join(od, LAYOUT_OUTPUT_NAMES[mode])
+        out_path = os.path.join(od, self._output_name(mode))
+        grid = None
+        if mode == LayoutMode.CUSTOM_GRID:
+            grid = [self.spin_grid_rows.value(), self.spin_grid_cols.value()]
         # 阶段二：合成、写出与打印
         self._compose_worker = _ComposeWorker(
             pages, mode, orient, add_cut, out_path,
-            self._layout_do_print, self._layout_copies, parent=self,
+            self._layout_do_print, self._layout_copies,
+            printer=self._layout_printer, grid=grid, parent=self,
         )
         self._compose_worker.progress.connect(self.statusBar().showMessage)
         self._compose_worker.composed.connect(self._on_composed)
@@ -628,17 +693,18 @@ class MainWindow(QMainWindow):
         out_dir = self.line_out.text().strip() or None
         od = out_dir or os.path.dirname(files[0])
         # 按当前选择的布局模式定位排版输出文件
-        target = os.path.join(od, LAYOUT_OUTPUT_NAMES[self._resolve_layout_mode()])
+        target = os.path.join(od, self._output_name(self._resolve_layout_mode()))
         if not os.path.exists(target):
             QMessageBox.information(self, "提示", "未找到排版后的文件，请先排版")
             return
         copies = self.spin_copies.value()
+        printer = self._selected_printer()
         self.set_busy(True)
         self.statusBar().showMessage("正在打开打印对话框…")
         try:
             for _ in range(copies):
                 try:
-                    print_pdf(target)
+                    print_pdf(target, printer)
                 except Exception:
                     pass
         finally:
@@ -654,6 +720,7 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def closeEvent(self, event):
+        self._save_settings()
         # 后台线程仍在读取/排版时，先请求中断并等待当前文件处理完，
         # 避免线程随窗口销毁导致的崩溃
         for attr in ("_load_worker", "_compose_worker"):
@@ -662,6 +729,62 @@ class MainWindow(QMainWindow):
                 worker.requestInterruption()
                 worker.wait()
         event.accept()
+
+    SETTINGS_ORG = "Simon Chan"
+    SETTINGS_APP = "InvoiceLayoutAndPrinting"
+
+    def _load_settings(self):
+        s = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+        try:
+            geo = s.value("window/geometry")
+            if geo is not None:
+                self.restoreGeometry(geo)
+        except Exception:
+            pass
+        try:
+            tile = s.value("layout/tile", 1, type=int)
+            if tile == 0:
+                self.btn_layout_custom.setChecked(True)
+            elif tile == 1:
+                self.btn_layout_one.setChecked(True)
+            elif tile == 2:
+                self.btn_layout_two_v.setChecked(True)
+            elif tile == 3:
+                self.btn_layout_four.setChecked(True)
+            if s.value("layout/portrait", True, type=bool):
+                self.btn_portrait.setChecked(True)
+            else:
+                self.btn_landscape.setChecked(True)
+            self.chk_cutline.setChecked(s.value("layout/cutlines", False, type=bool))
+            self.spin_grid_rows.setValue(s.value("layout/grid_rows", 2, type=int))
+            self.spin_grid_cols.setValue(s.value("layout/grid_cols", 2, type=int))
+            self.spin_copies.setValue(s.value("print/copies", 1, type=int))
+            self.chk_print.setChecked(s.value("print/after_layout", False, type=bool))
+            self.line_out.setText(s.value("paths/output_dir", "", type=str))
+            idx = s.value("print/printer_index", 0, type=int)
+            if 0 <= idx < self.combo_printer.count():
+                self.combo_printer.setCurrentIndex(idx)
+        except Exception:
+            pass
+        # 同步派生 UI 状态（程序化 setChecked 不触发 idClicked）
+        try:
+            self._update_two_tile_caption()
+            self._update_grid_visibility()
+        except Exception:
+            pass
+
+    def _save_settings(self):
+        s = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+        s.setValue("window/geometry", self.saveGeometry())
+        s.setValue("layout/tile", self.group_layout_tiles.checkedId())
+        s.setValue("layout/portrait", self.btn_portrait.isChecked())
+        s.setValue("layout/cutlines", self.chk_cutline.isChecked())
+        s.setValue("layout/grid_rows", self.spin_grid_rows.value())
+        s.setValue("layout/grid_cols", self.spin_grid_cols.value())
+        s.setValue("print/copies", self.spin_copies.value())
+        s.setValue("print/after_layout", self.chk_print.isChecked())
+        s.setValue("print/printer_index", self.combo_printer.currentIndex())
+        s.setValue("paths/output_dir", self.line_out.text().strip())
 
     def load_preview(self, path: str):
         self.pdf_doc.load(path)
@@ -674,8 +797,28 @@ class MainWindow(QMainWindow):
             self.pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
         except Exception:
             pass
+        self._update_page_label()
+
+def _setup_file_logging():
+    """打包后的 exe 没有控制台，日志写入本地文件便于排查印章/打印问题。"""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    log_dir = os.path.join(base, "InvoiceLayoutAndPrinting", "logs")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        handler = RotatingFileHandler(
+            os.path.join(log_dir, "gui.log"),
+            maxBytes=1_000_000, backupCount=3, encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root = logging.getLogger()
+        root.setLevel(logging.INFO)
+        root.addHandler(handler)
+    except Exception:
+        pass  # 日志不可用时不能阻断 GUI 启动
 
 def run_gui():
+    _setup_file_logging()
+    logging.getLogger(__name__).info("启动 GUI")
     app = QApplication([])
     # Apply app icon for taskbar/titlebar
     try:
