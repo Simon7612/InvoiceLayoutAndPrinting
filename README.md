@@ -7,7 +7,7 @@
 - 文件列表仅显示文件名，支持拖拽排序，右侧系统风格“关闭”图标一键移除
 - 排版方式：双页竖向合并（两页拼成一页，上下排列）
 - 预览窗口支持多页滚动查看，自动适配宽度
-- 打印：支持系统打印对话框，或调用 Edge 打印（如可用）
+- 打印：优先 SumatraPDF 打印对话框（如可用），其次系统关联程序打印，Edge/默认查看器兜底
 - 兼容不同尺寸与裁剪框的发票 PDF，修复印章（PDF 注释）在合成后位置偏移的问题
 
 ## 快速开始
@@ -51,7 +51,8 @@
   - 文件列表使用 `QListWidget` 自定义行控件，支持拖拽排序、系统图标删除按钮
   - 预览使用 `QPdfDocument` + `QPdfView`，启用 `MultiPage` 模式与 `FitToWidth`
 - 打印在 `printInvoice.py`：
-  - 优先尝试 Edge 的打印对话框；不可用则调用 Windows Shell 打印或打开默认查看器
+  - 优先 SumatraPDF 的命令行打印对话框（支持便携版放在 exe 旁）；其次系统 `print` 动词/PowerShell，Edge 与默认查看器兜底
+  - 所有外部程序均以非阻塞方式启动，不卡界面
 
 ## 常见问题
 - 路径包含特殊字符（如 `&`）：命令行中会被当作分隔符；本项目的 `Makefile` 已通过在 PowerShell 中调用虚拟环境 Python 并对参数加引号进行规避
@@ -107,4 +108,4 @@ InvoiceLayoutAndPrinting/
 - 输出文件命名示例：`merged_1up.pdf`、`merged_2up_v.pdf`、`merged_2up_h.pdf`、`merged_4up.pdf`
 
 ### 命令行（CLI）
-- 原 CLI 仍支持 2-up（上下）批处理；新版高级布局优先通过 GUI 使用
+- CLI 批处理与 GUI 同样支持 PDF/OFD/XML（自动转换为 PDF 后 2-up 上下合并）；多布局模式优先通过 GUI 使用

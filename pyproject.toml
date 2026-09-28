@@ -1,7 +1,7 @@
 [project]
 name = "invoicelayoutandprinting"
 version = "0.1.0"
-description = "Add your description here"
+description = "发票排版与打印：将多张 PDF/OFD/XML 发票按 N-up 布局合成、预览并打印的 Windows 桌面工具"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
