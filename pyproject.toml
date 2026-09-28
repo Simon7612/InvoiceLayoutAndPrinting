@@ -2,6 +2,7 @@
 name = "invoicelayoutandprinting"
 version = "0.1.0"
 description = "发票排版与打印：将多张 PDF/OFD/XML 发票按 N-up 布局合成、预览并打印的 Windows 桌面工具"
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -17,8 +18,22 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.16.9",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# 务实最小集：真实错误优先。项目刻意保留带日志的宽 except（BLE/S）与
+# 旧式 typing 注解（UP），不做强制。
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# main.py 必须在 import 前过滤 ofdparser/easyofd 的 SyntaxWarning
+"main.py" = ["E402"]
