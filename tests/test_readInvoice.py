@@ -117,6 +117,59 @@ def test_read_document_xml_rejects_entity_expansion(tmp_path):
         read_document(str(f))
 
 
+# ---------------- OFD 转换回退链 ----------------
+
+def test_read_document_ofd_uses_ofdparser(monkeypatch, tmp_path):
+    import readInvoice as ri
+
+    class FakeParser:
+        def __init__(self, b64):
+            pass
+        def ofd2pdf(self):
+            return make_pdf_bytes()
+
+    monkeypatch.setattr(ri, "_HAS_OFDPARSER", True)
+    monkeypatch.setattr(ri, "_HAS_EASYOFD", False)
+    monkeypatch.setattr(ri, "OfdParser", FakeParser, raising=False)
+    f = tmp_path / "doc.ofd"
+    f.write_bytes(b"PK\x03\x04fake-ofd")
+    assert len(read_document(str(f)).pages) == 1
+
+
+def test_read_document_ofd_falls_back_to_easyofd(monkeypatch, tmp_path):
+    import readInvoice as ri
+
+    class GarbageParser:
+        def __init__(self, b64):
+            pass
+        def ofd2pdf(self):
+            return b"short"  # 长度 <= 10 视为失败，触发回退
+
+    class FakeEasyofd:
+        @staticmethod
+        def ofd2pdf(data):
+            return make_pdf_bytes()
+
+    monkeypatch.setattr(ri, "_HAS_OFDPARSER", True)
+    monkeypatch.setattr(ri, "OfdParser", GarbageParser, raising=False)
+    monkeypatch.setattr(ri, "_HAS_EASYOFD", True)
+    monkeypatch.setattr(ri, "easyofd", FakeEasyofd, raising=False)
+    f = tmp_path / "doc.ofd"
+    f.write_bytes(b"PK\x03\x04fake-ofd")
+    assert len(read_document(str(f)).pages) == 1
+
+
+def test_read_document_ofd_without_libraries_raises(monkeypatch, tmp_path):
+    import readInvoice as ri
+
+    monkeypatch.setattr(ri, "_HAS_OFDPARSER", False)
+    monkeypatch.setattr(ri, "_HAS_EASYOFD", False)
+    f = tmp_path / "doc.ofd"
+    f.write_bytes(b"PK\x03\x04fake-ofd")
+    with pytest.raises(RuntimeError):
+        read_document(str(f))
+
+
 # ---------------- detect_ticket_document ----------------
 
 def test_detect_ticket_matches_keywords_and_orientation():
@@ -128,6 +181,13 @@ def test_detect_ticket_matches_keywords_and_orientation():
 
 def test_detect_ticket_negative():
     reader = PdfReader(io.BytesIO(make_pdf_bytes(text="Invoice total amount due")))
+    matched, _ = detect_ticket_document(reader)
+    assert matched is False
+
+
+def test_detect_ticket_single_english_keyword_not_matched():
+    # 单个英文常见词不构成车票证据（需 ≥2 命中）
+    reader = PdfReader(io.BytesIO(make_pdf_bytes(text="gate 12 information")))
     matched, _ = detect_ticket_document(reader)
     assert matched is False
 

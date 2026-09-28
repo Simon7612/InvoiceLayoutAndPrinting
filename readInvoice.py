@@ -210,8 +210,10 @@ def detect_ticket_document(reader: PdfReader, max_pages: int = 3) -> Tuple[bool,
         except Exception:
             txt = ""
         low = txt.lower()
-        # 中文关键词直接 in 检测（不转小写）
-        if any(k in txt for k in _TICKET_KEYWORDS_CN) or any(k in low for k in _TICKET_KEYWORDS_EN):
+        cn_hits = sum(1 for k in _TICKET_KEYWORDS_CN if k in txt)
+        en_hits = sum(1 for k in _TICKET_KEYWORDS_EN if k in low)
+        # 中文关键词常因字体嵌入提取不全，单命中即可；英文是常见词，需 ≥2 命中防误报
+        if cn_hits >= 1 or en_hits >= 2:
             matched = True
             break
     # 推荐方向
