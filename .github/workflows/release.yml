@@ -1,75 +1,114 @@
-name: Build and Release (Windows)
+name: Test and Release (Windows)
 
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*.*.*' ]  # 语义化版本标签触发 release
   pull_request:
     branches: [ main ]
 
-jobs:
-  build-windows-exe:
-    runs-on: windows-latest
+# 默认最小权限；release job 单独提升为 contents: write（创建标签与 Release 必需）
+permissions:
+  contents: read
 
+jobs:
+  # 每次 push/PR 都跑：uv sync 按 pyproject 安装全量依赖（含 ofdparser/easyofd/numpy），
+  # 保证测试与冒烟覆盖真实 OFD/XML 功能
+  test:
+    runs-on: windows-latest
+    concurrency:
+      group: test-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
+          enable-cache: true
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install nuitka pyqt6 pypdf defusedxml pytest
+        run: uv sync
 
       - name: Run tests
-        run: python -m pytest -q
+        run: uv run pytest -q
 
       - name: Run basic import test (smoke test)
-        run: python -c "import gui, pipeline, layoutInvoice, printInvoice, readInvoice; print('All modules imported successfully')"
+        run: uv run python -c "import gui, pipeline, layoutInvoice, printInvoice, readInvoice; print('All modules imported successfully')"
+
+  # 发版由 pyproject 驱动：version 变更合入 main 后自动打 v{version} 标签并发布；
+  # 版本未变（同名 Release 已存在）时只跑 test，不重复发布
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
       - name: Read version from pyproject
         id: ver
         shell: pwsh
         run: |
-          $v = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
-          "product=$v" >> $env:GITHUB_OUTPUT
+          $v = uv run --no-project python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Skip if version already released
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          gh release view "v$env:VERSION" --repo "$env:GITHUB_REPOSITORY" > $null 2>&1
+          "exists=$(if ($LASTEXITCODE -eq 0) { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
+
+      - name: Install dependencies
+        if: steps.check.outputs.exists == 'false'
+        run: uv sync
 
       - name: Build executable with Nuitka
+        if: steps.check.outputs.exists == 'false'
+        shell: cmd
         run: |
-          python -m nuitka ^
-            --standalone ^
+          uv run python -m nuitka ^
             --onefile ^
-            --windows-disable-console ^
-            --windows-icon-from-ico=icon.ico ^
-            --windows-product-version=${{ steps.ver.outputs.product }} ^
-            --windows-file-version=${{ steps.ver.outputs.product }} ^
-            --include-package=PyQt6 ^
+            --windows-console-mode=disable ^
             --enable-plugin=pyqt6 ^
+            --windows-icon-from-ico=icon.ico ^
+            --product-version=${{ steps.ver.outputs.version }} ^
+            --file-version=${{ steps.ver.outputs.version }} ^
+            --include-package=PyQt6 ^
             --output-dir=dist ^
             --assume-yes-for-downloads ^
             main.py
 
-        shell: cmd
-
       - name: Rename output to expected name
-        run:  ren main.exe "发票排版与打印.exe"
+        if: steps.check.outputs.exists == 'false'
+        run: ren main.exe "发票排版与打印.exe"
         working-directory: ./dist
 
       - name: Upload artifact (for debugging or reuse)
+        if: steps.check.outputs.exists == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: windows-executable
           path: dist/发票排版与打印.exe
 
-      - name: Create GitHub Release and upload .exe
-        if: startsWith(github.ref, 'refs/tags/v')
+      # 标签不存在时由本步骤自动创建（指向当前构建的 commit），失败重跑可自愈
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: 发票排版与打印 v${{ steps.ver.outputs.version }}
           files: dist/发票排版与打印.exe
+          fail_on_unmatched_files: true
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
