@@ -15,15 +15,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install nuitka pyqt6 pypdf
+          pip install nuitka pyqt6 pypdf defusedxml pytest
+
+      - name: Run tests
+        run: python -m pytest -q
 
       - name: Run basic import test (smoke test)
         run: python -c "import gui, layoutInvoice, printInvoice, readInvoice; print('All modules imported successfully')"
