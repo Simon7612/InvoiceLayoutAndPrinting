@@ -30,7 +30,7 @@ make install | run | package | clean # Makefile；package 产出 dist/发票排�
 
 ## 约定与坑
 
-- **Windows 优先**：打印仅支持 Windows（非 Windows 会 raise）。CI（`.github/workflows/release.yml`）为 test/release 双 job，windows-latest 上用 Nuitka 构建。**发版由 pyproject 驱动**：把 version 变更合入 `main`，CI 读取版本并检查同名 Release——不存在则自动创建 `v{version}` 标签并发布，已存在则只跑测试；不要手动打 tag。版本号唯一来源是 `pyproject.toml` 的 `version`（CI 用 tomllib 读取，Makefile 用 `findstr` 派生，改版本只改 pyproject 一行）。
+- **Windows 优先**：打印仅支持 Windows（非 Windows 会 raise）。CI（`.github/workflows/release.yml`）为 test/release 双 job，windows-latest 上用 Nuitka 构建。**发版由 pyproject 驱动**：把 version 变更合入 `main`，CI 读取版本并检查同名 Release——不存在则自动创建 `v{version}` 标签并发布，已存在则只跑测试；不要手动打 tag。发布说明由 `cliff.toml`（git-cliff）从 Conventional Commits 自动生成中文分组（feat/fix/perf/refactor，其余类型跳过），所以提交信息要规范；release 资产为 ASCII 名 `InvoiceLayoutAndPrinting-<版本>.exe`（GitHub 会把中文资产名规范化成 default.exe）。版本号唯一来源是 `pyproject.toml` 的 `version`（CI 用 tomllib 读取，Makefile 用 `findstr` 派生，改版本只改 pyproject 一行）。
 - **文件名为 camelCase**（`layoutInvoice.py` 等），注释/README/UI 文案均为中文。
 - **OFD/XML 依赖是可选导入**：`ofdparser`（首选，**依赖 numpy**——曾因未声明 numpy 而静默失效）/`easyofd`（备选，另需 cv2 处理图片）用 try/except 导入并有 `_HAS_OFDPARSER`/`_HAS_EASYOFD` 开关；`main.py` 和 `readInvoice.py` 顶部对这两个库的 `SyntaxWarning` 做了过滤（故 main.py 有 E402 豁免），改动导入顺序时别弄丢。
 - **改合成逻辑时必须保持两件事**：1) 用每页 `cropbox` 对齐坐标系（不同来源 PDF 尺寸/裁剪框不同）；2) 电子印章注释定位——`merge_transformed_page` 会**原样**复制 `/Annots`（不做坐标变换），实际定位靠合并后对 `/Rect` 按"与内容完全相同的变换"修正（纯平移用 `_adjust_merged_annots`，含缩放用 `_transform_annots`），两处变换必须一致。回归测试在 `tests/test_layoutInvoice.py`（含 cropbox 原点偏移与宫格象限用例），回归会直接毁掉核心功能。

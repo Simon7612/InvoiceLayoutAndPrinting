@@ -87,6 +87,7 @@ InvoiceLayoutAndPrinting/
 - 单文件打包、禁用控制台、启用 PyQt6 插件，保留图标与元信息；构建后产物为 `dist/发票排版与打印.exe`
 - 版本号以 `pyproject.toml` 的 `version` 为唯一来源：CI 用 tomllib 自动读取，Makefile 用 `make version` 查看自动补齐的四段格式
 - 自动发版：把 `pyproject.toml` 的 `version` 改好并合入 `main` 即可，CI 会自动创建 `v{version}` 标签、构建 exe 并发布 GitHub Release；版本未变时只运行测试，无需手动打 tag
+- 发布说明自动生成：CI 用 git-cliff 按 `cliff.toml` 从 Conventional Commits 生成中文分组说明（`feat`/`fix`/`perf`/`refactor`，`docs`/`ci`/`chore` 等不列入）；Release 附件为 `InvoiceLayoutAndPrinting-<版本>.exe`
 - 执行：`make package`
 - 打包后的 exe 无控制台，运行日志写入 `%LOCALAPPDATA%\InvoiceLayoutAndPrinting\logs\gui.log`（滚动保留 3 份），便于排查印章/打印问题
 

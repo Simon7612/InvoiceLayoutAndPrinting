@@ -47,6 +47,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # git-cliff 生成发布说明需要完整历史与 tag
+          fetch-depth: 0
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -95,21 +98,23 @@ jobs:
             --product-version=${{ steps.ver.outputs.version }} ^
             --file-version=${{ steps.ver.outputs.version }} ^
             --include-package=PyQt6 ^
+            --output-filename=InvoiceLayoutAndPrinting-${{ steps.ver.outputs.version }}.exe ^
             --output-dir=dist ^
             --assume-yes-for-downloads ^
             main.py
 
-      - name: Rename output to expected name
+      # 发布说明由 git-cliff 从 Conventional Commits 生成（见 cliff.toml），
+      # generate_release_notes 只会在正文后追加 Full Changelog 链接（无 PR 可列）
+      - name: Generate release notes
         if: steps.check.outputs.exists == 'false'
-        run: ren main.exe "发票排版与打印.exe"
-        working-directory: ./dist
+        run: uvx git-cliff --unreleased --strip all -o RELEASE_NOTES.md
 
       - name: Upload artifact (for debugging or reuse)
         if: steps.check.outputs.exists == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: windows-executable
-          path: dist/发票排版与打印.exe
+          path: dist/InvoiceLayoutAndPrinting-*.exe
 
       # 标签不存在时由本步骤自动创建（指向当前构建的 commit），失败重跑可自愈
       - name: Create GitHub Release
@@ -118,6 +123,7 @@ jobs:
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: 发票排版与打印 v${{ steps.ver.outputs.version }}
-          files: dist/发票排版与打印.exe
+          body_path: RELEASE_NOTES.md
+          files: dist/InvoiceLayoutAndPrinting-*.exe
           fail_on_unmatched_files: true
           generate_release_notes: true

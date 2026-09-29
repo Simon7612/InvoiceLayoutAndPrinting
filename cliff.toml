@@ -1,0 +1,45 @@
+# git-cliff 配置：从 Conventional Commits 生成中文发布说明
+# 发布说明只保留用户可感知的改动（feat/fix/perf/refactor），docs/ci/chore 等跳过。
+# 模板基于 git-cliff 2.x 默认配置（--init 生成），仅去掉版本标题行、汉化分组名。
+[changelog]
+header_marker = "<!-- git-cliff: end of header -->"
+body = """
+{% for entry in commits | commit_groups(groups=commit_parsers_groups) %}
+### {{ entry.group | striptags | trim | upper_first }}
+{% for commit in entry.commits %}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+{% if commit.breaking %}[**breaking**] {% endif %}\
+{{ commit.message | upper_first }}\
+{% endfor %}
+
+{% endfor %}\
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+require_conventional = false
+split_commits = false
+protect_breaking_commits = false
+commit_parsers = [
+    { message = "^feat", group = "<!-- 0 -->新功能" },
+    { message = "^fix", group = "<!-- 1 -->问题修复" },
+    { message = "^perf", group = "<!-- 2 -->性能优化" },
+    { message = "^refactor", group = "<!-- 3 -->代码重构" },
+    { message = "^revert", group = "<!-- 4 -->代码重构" },
+    { message = "^doc", skip = true },
+    { message = "^style", skip = true },
+    { message = "^test", skip = true },
+    { message = "^chore|^ci|^build", skip = true },
+    { message = ".*", skip = true },
+]
+# 被解析器 skip 的提交不出现在发布说明里
+filter_commits = true
+fail_on_unmatched_commit = false
+link_parsers = []
+use_branch_tags = false
+topo_order = false
+topo_order_commits = true
+sort_commits = "oldest"
+recurse_submodules = false
